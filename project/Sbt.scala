@@ -240,7 +240,9 @@ object Sbt extends Build
 		watchSources <++= apiDefinitions,
 		resourceGenerators in Compile <+= (version, resourceManaged, streams, compile in Compile) map generateVersionFile,
 		apiDefinitions <<= baseDirectory map { base => (base / "definition") :: (base / "other") :: (base / "type") :: Nil },
-		sourceGenerators in Compile <+= (cacheDirectory, apiDefinitions, fullClasspath in Compile in datatypeSub, sourceManaged in Compile, mainClass in datatypeSub in Compile, runner, streams) map generateAPICached
+		sourceGenerators in Compile <+= (cacheDirectory, apiDefinitions, fullClasspath in Compile in datatypeSub, sourceManaged in Compile, mainClass in datatypeSub in Compile, runner, streams) map generateAPICached,
+		libraryDependencies += "org.scala-lang.modules" %% "scala-compiler-doc" % "1.0.0-RC1",
+		libraryDependencies += "org.scala-lang.modules" %% "scala-compiler-interactive" % "1.0.0-RC1"
 	)
 
 	def precompiledSettings = Seq(
