@@ -2,7 +2,7 @@ import sbt._
 import Keys._
 import StatusPlugin.autoImport._
 import org.apache.ivy.util.url.CredentialsStore
-import com.typesafe.sbt.JavaVersionCheckPlugin.autoImport._
+// import com.typesafe.sbt.JavaVersionCheckPlugin.autoImport._
 
 object Release extends Build {
   lazy val remoteBase = SettingKey[String]("remote-base")
@@ -30,7 +30,7 @@ object Release extends Build {
       // Note - This will eitehr issue a failure or succeed.
       getCredentials(credentials.value, streams.value.log)
     }
-  ) ++ lameCredentialSettings ++ javaVersionCheckSettings
+  ) ++ lameCredentialSettings //++ javaVersionCheckSettings
 
   def snapshotPattern(version: String) = Resolver.localBasePattern.replaceAll("""\[revision\]""", version)
   def publishResolver: Def.Initialize[Option[Resolver]] = (remoteID, remoteBase) { (id, base) =>
@@ -57,8 +57,8 @@ object Release extends Build {
         case None        => sys.error("No credentials defined for " + PublishRepoHost)
       }
     }
-
-  def javaVersionCheckSettings = Seq(
-    javaVersionPrefix in javaVersionCheck := Some("1.6")
-  )
+  //
+  // def javaVersionCheckSettings = Seq(
+  //   javaVersionPrefix in javaVersionCheck := Some("1.6")
+  // )
 }
