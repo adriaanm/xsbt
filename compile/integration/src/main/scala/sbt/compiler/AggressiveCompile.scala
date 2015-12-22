@@ -167,7 +167,7 @@ class AggressiveCompile(cacheFile: File) {
       log.debug(label + " took " + (elapsed / 1e9) + " s")
       result
     }
-  private[this] def logInputs(log: Logger, javaCount: Int, scalaCount: Int, outputDirs: Seq[File]) {
+  private[this] def logInputs(log: Logger, javaCount: Int, scalaCount: Int, outputDirs: Seq[File]): Unit = {
     val scalaMsg = Analysis.counted("Scala source", "", "s", scalaCount)
     val javaMsg = Analysis.counted("Java source", "", "s", javaCount)
     val combined = scalaMsg ++ javaMsg
@@ -182,7 +182,7 @@ class AggressiveCompile(cacheFile: File) {
   def javaOnly(f: File) = f.getName.endsWith(".java")
 
   private[this] def explicitBootClasspath(options: Seq[String]): Seq[File] =
-    options.dropWhile(_ != CompilerArguments.BootClasspathOption).drop(1).take(1).headOption.toList.flatMap(IO.parseClasspath)
+    options.dropWhile(_ != CompilerArguments.BootClasspathOption).slice(1, 2).headOption.toList.flatMap(IO.parseClasspath)
 
   val store = MixedAnalyzingCompiler.staticCachedStore(cacheFile)
 

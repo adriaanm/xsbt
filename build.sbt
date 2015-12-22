@@ -12,11 +12,11 @@ import Sxr.sxr
 // but can be shared across the multi projects.
 def buildLevelSettings: Seq[Setting[_]] = Seq(
   organization in ThisBuild := "org.scala-sbt",
-  version in ThisBuild := "0.13.8"
+  version in ThisBuild := "0.13.8-SNAPSHOT"
 )
 
 def commonSettings: Seq[Setting[_]] = Seq(
-  scalaVersion := "2.10.4",
+  scalaVersion := scala210,
   publishArtifact in packageDoc := false,
   publishMavenStyle := false,
   componentID := None,
@@ -398,7 +398,7 @@ lazy val scriptedBaseProj = (project in scriptedPath / "base").
   )
 
 lazy val scriptedSbtProj = (project in scriptedPath / "sbt").
-  dependsOn (ioProj, logProj, processProj, scriptedBaseProj, launchInterfaceProj % "provided").
+  dependsOn (ioProj, logProj, processProj, scriptedBaseProj, interfaceProj).
   settings(baseSettings: _*).
   settings(
     name := "Scripted sbt"

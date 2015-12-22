@@ -29,12 +29,12 @@ object APIUtil {
 
     // Don't visit inherited definitions since we consider that a class
     // that inherits a macro does not have a macro.
-    override def visitStructure0(structure: Structure) {
+    override def visitStructure0(structure: Structure): Unit = {
       visitTypes(structure.parents)
       visitDefinitions(structure.declared)
     }
 
-    override def visitModifiers(m: Modifiers) {
+    override def visitModifiers(m: Modifiers): Unit = {
       hasMacro ||= m.isMacro
       super.visitModifiers(m)
     }
@@ -60,6 +60,15 @@ object APIUtil {
     new Structure(lzy(s.parents), filterDefinitions(s.declared, isModule), filterDefinitions(s.inherited, isModule))
   def filterDefinitions(ds: Array[Definition], isModule: Boolean): Lazy[Array[Definition]] =
     lzy(if (isModule) ds filter Discovery.isMainMethod else Array())
+
+  def isNonPrivate(d: Definition): Boolean = isNonPrivate(d.access)
+  /** Returns false if the `access` is `Private` and qualified, true otherwise.*/
+  def isNonPrivate(access: Access): Boolean =
+    access match {
+      case p: Private if !p.qualifier.isInstanceOf[IdQualifier] => false
+      case _ => true
+    }
+
   private[this] def lzy[T <: AnyRef](t: T): Lazy[T] = SafeLazy.strict(t)
 
   private[this] val emptyType = new EmptyType

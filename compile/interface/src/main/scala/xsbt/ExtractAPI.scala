@@ -10,7 +10,7 @@ import scala.collection.mutable.{ HashMap, HashSet, ListBuffer }
 import xsbti.api.{ ClassLike, DefinitionType, PathComponent, SimpleType }
 
 /**
- * Extracts API representation out of Symbols and Types.
+ * Extracts full (including private members) API representation out of Symbols and Types.
  *
  * Each compilation unit should be processed by a fresh instance of this class.
  *
@@ -18,6 +18,12 @@ import xsbti.api.{ ClassLike, DefinitionType, PathComponent, SimpleType }
  * it has a call to `addInheritedDependencies` method defined in CallbackGlobal. In the future
  * we should refactor this code so inherited dependencies are just accumulated in a buffer and
  * exposed to a client that can pass them to an instance of CallbackGlobal it holds.
+ *
+ * NOTE: This class extract *full* API representation. In most of other places in the incremental compiler,
+ * only non-private (accessible from other compilation units) members are relevant. Other parts of the
+ * incremental compiler filter out private definitions before processing API structures. Check SameAPI for
+ * an example.
+ *
  */
 class ExtractAPI[GlobalType <: CallbackGlobal](val global: GlobalType,
     // Tracks the source file associated with the CompilationUnit currently being processed by the API phase.
@@ -178,9 +184,32 @@ class ExtractAPI[GlobalType <: CallbackGlobal](val global: GlobalType,
 
   private def viewer(s: Symbol) = (if (s.isModule) s.moduleClass else s).thisType
   private def printMember(label: String, in: Symbol, t: Type) = println(label + " in " + in + " : " + t + " (debug: " + debugString(t) + " )")
-  private def defDef(in: Symbol, s: Symbol) =
+
+  private def defDef(in: Symbol, s: Symbol): List[xsbti.api.Def] =
     {
-      def build(t: Type, typeParams: Array[xsbti.api.TypeParameter], valueParameters: List[xsbti.api.ParameterList]): xsbti.api.Def =
+      import MirrorHelper._
+
+      val hasValueClassAsParameter: Boolean = {
+        import MirrorHelper._
+        s.asMethod.paramss.flatten map (_.info) exists (t => isAnyValSubtype(t.typeSymbol))
+      }
+
+      // Note: We only inspect the "outermost type" (i.e. no recursion) because we don't need to
+      // inspect after erasure a function that would, for instance, return a function that returns
+      // a subtype of AnyVal.
+      val hasValueClassAsReturnType: Boolean = {
+        val tpe = viewer(in).memberInfo(s)
+        tpe match {
+          case PolyType(_, base) => isAnyValSubtype(base.typeSymbol)
+          case MethodType(_, resultType) => isAnyValSubtype(resultType.typeSymbol)
+          case Nullary(resultType) => isAnyValSubtype(resultType.typeSymbol)
+          case resultType => isAnyValSubtype(resultType.typeSymbol)
+        }
+      }
+
+      val inspectPostErasure = hasValueClassAsParameter || hasValueClassAsReturnType
+
+      def build(t: Type, typeParams: Array[xsbti.api.TypeParameter], valueParameters: List[xsbti.api.ParameterList]): List[xsbti.api.Def] =
         {
           def parameterList(syms: List[Symbol]): xsbti.api.ParameterList =
             {
@@ -192,13 +221,56 @@ class ExtractAPI[GlobalType <: CallbackGlobal](val global: GlobalType,
               assert(typeParams.isEmpty)
               assert(valueParameters.isEmpty)
               build(base, typeParameters(in, typeParams0), Nil)
-            case MethodType(params, resultType) =>
-              build(resultType, typeParams, parameterList(params) :: valueParameters)
+            case mType @ MethodType(params, resultType) =>
+              // The types of a method's parameters change between phases: For instance, if a
+              // parameter is a subtype of AnyVal, then it won't have the same type before and after
+              // erasure. Therefore we record the type of parameters before AND after erasure to
+              // make sure that we don't miss some API changes.
+              //   class A(val x: Int) extends AnyVal
+              //   def foo(a: A): Int = A.x <- has type (LA)I before erasure
+              //                            <- has type (I)I after erasure
+              // If we change A from value class to normal class, we need to recompile all clients
+              // of def foo.
+              val beforeErasure =
+                build(resultType, typeParams, parameterList(params) :: valueParameters)
+              val afterErasure  =
+                if (inspectPostErasure)
+                  build(resultType, typeParams, global exitingPostErasure (parameterList(mType.params) :: valueParameters))
+                else
+                  Nil
+
+              beforeErasure ++ afterErasure
             case Nullary(resultType) => // 2.9 and later
               build(resultType, typeParams, valueParameters)
             case returnType =>
-              val t2 = processType(in, dropConst(returnType))
-              new xsbti.api.Def(valueParameters.reverse.toArray, t2, typeParams, simpleName(s), getAccess(s), getModifiers(s), annotations(in, s))
+              def makeDef(retTpe: xsbti.api.Type): xsbti.api.Def =
+                new xsbti.api.Def(
+                  valueParameters.reverse.toArray,
+                  retTpe,
+                  typeParams,
+                  simpleName(s),
+                  getAccess(s),
+                  getModifiers(s),
+                  annotations(in, s))
+
+              // The return type of a method may change before and after erasure. Consider the
+              // following method:
+              //   class A(val x: Int) extends AnyVal
+              //   def foo(x: Int): A = new A(x) <- has type (I)LA before erasure
+              //                                 <- has type (I)I after erasure
+              // If we change A from value class to normal class, we need to recompile all clients
+              // of def foo.
+              val beforeErasure = makeDef(processType(in, dropConst(returnType)))
+              val afterErasure =
+                if (inspectPostErasure) {
+                  val erasedReturn = dropConst(global exitingPostErasure viewer(in).memberInfo(s)) map {
+                    case MethodType(_, r) => r
+                    case other            => other
+                  }
+                  List(makeDef(processType(in, erasedReturn)))
+                } else Nil
+
+              beforeErasure :: afterErasure
           }
         }
       def parameterS(s: Symbol): xsbti.api.MethodParameter =
@@ -266,7 +338,7 @@ class ExtractAPI[GlobalType <: CallbackGlobal](val global: GlobalType,
 
   private def mkStructure(info: Type, s: Symbol, inherit: Boolean): xsbti.api.Structure =
     {
-      val (declared, inherited) = info.members.reverse.partition(_.owner == s)
+      val (declared, inherited) = info.members.toList.reverse.partition(_.owner == s)
       val baseTypes = info.baseClasses.tail.map(info.baseType)
       val ds = if (s.isModuleClass) removeConstructors(declared) else declared
       val is = if (inherit) removeConstructors(inherited) else Nil
@@ -292,22 +364,22 @@ class ExtractAPI[GlobalType <: CallbackGlobal](val global: GlobalType,
     defs
   }
 
-  private def definition(in: Symbol, sym: Symbol): Option[xsbti.api.Definition] =
+  private def definition(in: Symbol, sym: Symbol): List[xsbti.api.Definition] =
     {
-      def mkVar = Some(fieldDef(in, sym, false, new xsbti.api.Var(_, _, _, _, _)))
-      def mkVal = Some(fieldDef(in, sym, true, new xsbti.api.Val(_, _, _, _, _)))
+      def mkVar = List(fieldDef(in, sym, false, new xsbti.api.Var(_, _, _, _, _)))
+      def mkVal = List(fieldDef(in, sym, true, new xsbti.api.Val(_, _, _, _, _)))
       if (isClass(sym))
-        if (ignoreClass(sym)) None else Some(classLike(in, sym))
+        if (ignoreClass(sym)) Nil else List(classLike(in, sym))
       else if (sym.isNonClassType)
-        Some(typeDef(in, sym))
+        List(typeDef(in, sym))
       else if (sym.isVariable)
-        if (isSourceField(sym)) mkVar else None
+        if (isSourceField(sym)) mkVar else Nil
       else if (sym.isStable)
-        if (isSourceField(sym)) mkVal else None
+        if (isSourceField(sym)) mkVal else Nil
       else if (sym.isSourceMethod && !sym.isSetter)
-        if (sym.isGetter) mkVar else Some(defDef(in, sym))
+        if (sym.isGetter) mkVar else defDef(in, sym)
       else
-        None
+        Nil
     }
   private def ignoreClass(sym: Symbol): Boolean =
     sym.isLocalClass || sym.isAnonymousClass || sym.fullName.endsWith(LocalChild.toString)
