@@ -120,7 +120,7 @@ private[sbt] object ConvertResolver {
               }
             }
             val resolver = new PluginCapableResolver
-            if (repo.localIfFile) resolver.setRepository(new LocalIfFileRepo)
+            resolver.setRepository(new LocalIfFileRepo)
             initializeMavenStyle(resolver, repo.name, repo.root)
             resolver.setPatterns() // has to be done after initializeMavenStyle, which calls methods that overwrite the patterns
             resolver
@@ -253,7 +253,7 @@ private[sbt] object ConvertResolver {
           if (totalLength > 0) {
             progress.setTotalLength(totalLength);
           }
-          FileUtil.copy(source, new java.io.File(url.toURI), progress, overwrite)
+          FileUtil.copy(source, new java.io.File(url.toURI), progress)
         } catch {
           case ex: IOException =>
             fireTransferError(ex)

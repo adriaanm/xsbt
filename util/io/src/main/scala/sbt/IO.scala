@@ -38,23 +38,14 @@ object IO {
   /**
    * Returns a URL for the directory or jar containing the the class file `cl`.
    * If the location cannot be determined, an error is generated.
+   * Note that Java standard library classes typically do not have a location associated with them.
    */
-  def classLocation(cl: Class[_]): URL = {
-    val codeSource = cl.getProtectionDomain.getCodeSource
-    if (codeSource ne null) {
-      codeSource.getLocation
-    } else {
-      // NB: This assumes that classes without code sources are System classes, and thus located in
-      // jars. It assumes that `urlAsFile` will truncate to the containing jar file.
-      val clsfile = s"${cl.getName.replace('.', '/')}.class"
-      Option(ClassLoader.getSystemClassLoader.getResource(clsfile))
-        .flatMap {
-          urlAsFile
-        }.getOrElse {
-          sys.error("No class location for " + cl)
-        }.toURI.toURL
+  def classLocation(cl: Class[_]): URL =
+    {
+      val codeSource = cl.getProtectionDomain.getCodeSource
+      if (codeSource == null) sys.error("No class location for " + cl)
+      else codeSource.getLocation
     }
-  }
 
   /**
    * Returns the directory or jar file containing the the class file `cl`.
@@ -582,7 +573,7 @@ object IO {
    * Any parent directories that do not exist are created.
    */
   def copyDirectory(source: File, target: File, overwrite: Boolean = false, preserveLastModified: Boolean = false): Unit =
-    copy((PathFinder(source) ***) pair Path.rebase(source, target), overwrite, preserveLastModified)
+    copy((PathFinder(source) ***) x Path.rebase(source, target), overwrite, preserveLastModified)
 
   /**
    * Copies the contents of `sourceFile` to the location of `targetFile`, overwriting any existing content.

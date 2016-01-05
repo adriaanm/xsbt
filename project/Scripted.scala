@@ -1,8 +1,7 @@
 import sbt._
 import Keys._
 import Def.Initialize
-
-import scala.language.reflectiveCalls
+import LaunchProguard._
 
 object Scripted {
   def scriptedPath = file("scripted")
@@ -19,11 +18,10 @@ object Scripted {
   case class ScriptedTestPage(page: Int, total: Int)
   def scriptedParser(scriptedBase: File): Parser[Seq[String]] =
     {
-      val scriptedFiles: NameFilter = ("test": NameFilter) | "pending"
-      val pairs = (scriptedBase * AllPassFilter * AllPassFilter * scriptedFiles).get map { (f: File) =>
+      val pairs = (scriptedBase * AllPassFilter * AllPassFilter * "test").get map { (f: File) =>
         val p = f.getParentFile
         (p.getParentFile.getName, p.getName)
-      }
+      };
       val pairMap = pairs.groupBy(_._1).mapValues(_.map(_._2).toSet);
 
       val id = charClass(c => !c.isWhitespace && c != '/').+.string

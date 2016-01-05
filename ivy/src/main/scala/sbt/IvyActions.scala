@@ -31,10 +31,7 @@ final class UpdateConfiguration(val retrieve: Option[RetrieveConfiguration], val
     logging: UpdateLogging.Value = this.logging): UpdateConfiguration =
     new UpdateConfiguration(retrieve, missingOk, logging)
 }
-final class RetrieveConfiguration(val retrieveDirectory: File, val outputPattern: String, val sync: Boolean, val configurationsToRetrieve: Option[Set[Configuration]]) {
-  def this(retrieveDirectory: File, outputPattern: String) = this(retrieveDirectory, outputPattern, false, None)
-  def this(retrieveDirectory: File, outputPattern: String, sync: Boolean) = this(retrieveDirectory, outputPattern, sync, None)
-}
+final class RetrieveConfiguration(val retrieveDirectory: File, val outputPattern: String)
 final case class MakePomConfiguration(file: File, moduleInfo: ModuleInfo, configurations: Option[Seq[Configuration]] = None, extra: NodeSeq = NodeSeq.Empty, process: XNode => XNode = n => n, filterRepositories: MavenRepository => Boolean = _ => true, allRepositories: Boolean, includeTypes: Set[String] = Set(Artifact.DefaultType, Artifact.PomType))
 // exclude is a map on a restricted ModuleID
 final case class GetClassifiersConfiguration(module: GetClassifiersModule, exclude: Map[ModuleID, Set[String]], configuration: UpdateConfiguration, ivyScala: Option[IvyScala])
@@ -180,7 +177,7 @@ object IvyActions {
                 Left(UnresolvedWarning(x, uwconfig))
               case Right(uReport) =>
                 configuration.retrieve match {
-                  case Some(rConf) => Right(retrieve(log, ivy, uReport, rConf))
+                  case Some(rConf) => Right(retrieve(ivy, uReport, rConf))
                   case None        => Right(uReport)
                 }
             }
@@ -196,7 +193,7 @@ object IvyActions {
             val cachedDescriptor = ivy.getSettings.getResolutionCacheManager.getResolvedIvyFileInCache(md.getModuleRevisionId)
             val uReport = IvyRetrieve.updateReport(report, cachedDescriptor)
             configuration.retrieve match {
-              case Some(rConf) => Right(retrieve(log, ivy, uReport, rConf))
+              case Some(rConf) => Right(retrieve(ivy, uReport, rConf))
               case None        => Right(uReport)
             }
         }
@@ -295,43 +292,20 @@ object IvyActions {
         } else None
       (resolveReport, err)
     }
-  private def retrieve(log: Logger, ivy: Ivy, report: UpdateReport, config: RetrieveConfiguration): UpdateReport =
-    retrieve(log, ivy, report, config.retrieveDirectory, config.outputPattern, config.sync, config.configurationsToRetrieve)
+  private def retrieve(ivy: Ivy, report: UpdateReport, config: RetrieveConfiguration): UpdateReport =
+    retrieve(ivy, report, config.retrieveDirectory, config.outputPattern)
 
-  private def retrieve(log: Logger, ivy: Ivy, report: UpdateReport, base: File, pattern: String, sync: Boolean, configurationsToRetrieve: Option[Set[Configuration]]): UpdateReport =
+  private def retrieve(ivy: Ivy, report: UpdateReport, base: File, pattern: String): UpdateReport =
     {
-      val configurationNames = configurationsToRetrieve match {
-        case None          => None
-        case Some(configs) => Some(configs.map(_.name))
-      }
-      val existingFiles = PathFinder(base).***.get filterNot { _.isDirectory }
       val toCopy = new collection.mutable.HashSet[(File, File)]
       val retReport = report retrieve { (conf, mid, art, cached) =>
-        configurationNames match {
-          case None                       => performRetrieve(conf, mid, art, base, pattern, cached, toCopy)
-          case Some(names) if names(conf) => performRetrieve(conf, mid, art, base, pattern, cached, toCopy)
-          case _                          => cached
-        }
+        val to = retrieveTarget(conf, mid, art, base, pattern)
+        toCopy += ((cached, to))
+        to
       }
       IO.copy(toCopy)
-      val resolvedFiles = toCopy.map(_._2)
-      if (sync) {
-        val filesToDelete = existingFiles.filterNot(resolvedFiles.contains)
-        filesToDelete foreach { f =>
-          log.info(s"Deleting old dependency: ${f.getAbsolutePath}")
-          f.delete()
-        }
-      }
-
       retReport
     }
-
-  private def performRetrieve(conf: String, mid: ModuleID, art: Artifact, base: File, pattern: String, cached: File, toCopy: collection.mutable.HashSet[(File, File)]): File = {
-    val to = retrieveTarget(conf, mid, art, base, pattern)
-    toCopy += ((cached, to))
-    to
-  }
-
   private def retrieveTarget(conf: String, mid: ModuleID, art: Artifact, base: File, pattern: String): File =
     new File(base, substitute(conf, mid, art, pattern))
 

@@ -9,9 +9,7 @@ import org.eclipse.aether.metadata.{ DefaultMetadata, Metadata }
 import org.eclipse.aether.resolution.{
   ArtifactDescriptorRequest => AetherDescriptorRequest,
   ArtifactRequest => AetherArtifactRequest,
-  MetadataRequest => AetherMetadataRequest,
-  VersionRequest => AetherVersionRequest,
-  VersionRangeRequest => AetherVersionRangeRequest
+  MetadataRequest => AetherMetadataRequest
 }
 import sbt.ivyint.CustomMavenResolver
 
@@ -31,8 +29,6 @@ class MavenCacheRepositoryResolver(val repo: MavenCache, settings: IvySettings)
   protected def setRepository(request: AetherMetadataRequest): AetherMetadataRequest = request
   protected def addRepositories(request: AetherDescriptorRequest): AetherDescriptorRequest = request
   protected def addRepositories(request: AetherArtifactRequest): AetherArtifactRequest = request
-  protected def addRepositories(request: AetherVersionRequest): AetherVersionRequest = request
-  protected def addRepositories(request: AetherVersionRangeRequest): AetherVersionRangeRequest = request
   protected def publishArtifacts(artifacts: Seq[AetherArtifact]): Unit = {
     val request = new AetherInstallRequest()
     artifacts foreach request.addArtifact

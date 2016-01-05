@@ -1,18 +1,19 @@
+import Project.Initialize
 import Util._
 import Dependencies._
+import Licensed._
+import Scope.ThisScope
+import LaunchProguard.{ proguard, Proguard }
 import Scripted._
+import StringUtilities.normalize
 import Sxr.sxr
 
 // ThisBuild settings take lower precedence,
 // but can be shared across the multi projects.
-def buildLevelSettings: Seq[Setting[_]] = inThisBuild(Seq(
-  organization := "org.scala-sbt",
-  version := "0.13.10-SNAPSHOT",
-  bintrayOrganization := Some(if (publishStatus.value == "releases") "typesafe" else "sbt"),
-  bintrayRepository := s"ivy-${publishStatus.value}",
-  bintrayPackage := "sbt",
-  bintrayReleaseOnPublish := false
-))
+def buildLevelSettings: Seq[Setting[_]] = Seq(
+  organization in ThisBuild := "org.scala-sbt",
+  version in ThisBuild := "0.13.8-SNAPSHOT"
+)
 
 def commonSettings: Seq[Setting[_]] = Seq(
   scalaVersion := scala210,
@@ -21,19 +22,16 @@ def commonSettings: Seq[Setting[_]] = Seq(
   componentID := None,
   crossPaths := false,
   resolvers += Resolver.typesafeIvyRepo("releases"),
-  resolvers += Resolver.sonatypeRepo("snapshots"),
   concurrentRestrictions in Global += Util.testExclusiveRestriction,
   testOptions += Tests.Argument(TestFrameworks.ScalaCheck, "-w", "1"),
   javacOptions in compile ++= Seq("-target", "6", "-source", "6", "-Xlint", "-Xlint:-serial"),
   incOptions := incOptions.value.withNameHashing(true),
-  crossScalaVersions := Seq(scala210),
-  bintrayPackage := (bintrayPackage in ThisBuild).value,
-  bintrayRepository := (bintrayRepository in ThisBuild).value
+  crossScalaVersions := Seq(scala210)
 )
 
 def minimalSettings: Seq[Setting[_]] =
   commonSettings ++ customCommands ++
-  publishPomSettings ++ Release.javaVersionCheckSettings
+  publishPomSettings //++ Release.javaVersionCheckSettings
 
 def baseSettings: Seq[Setting[_]] =
   minimalSettings ++ Seq(projectComponent) ++ baseScalacOptions ++ Licensed.settings ++ Formatting.settings
@@ -41,46 +39,85 @@ def baseSettings: Seq[Setting[_]] =
 def testedBaseSettings: Seq[Setting[_]] =
   baseSettings ++ testDependencies
 
-lazy val sbtRoot: Project = (project in file(".")).
+lazy val root: Project = (project in file(".")).
   configs(Sxr.sxrConf).
   aggregate(nonRoots: _*).
+  settings(buildLevelSettings: _*).
+  settings(minimalSettings ++ rootSettings: _*).
   settings(
-    buildLevelSettings,
-    minimalSettings,
-    rootSettings,
+    publish := {},
+    publishLocal := {
+      val p = (proguard in (proguardedLauncherProj, Proguard)).value
+      IO.copyFile(p, target.value / p.getName)
+    }
+  )
+
+// This is used only for command aggregation
+lazy val allPrecompiled: Project = (project in file("all-precompiled")).
+  aggregate(precompiled282, precompiled292, precompiled293).
+  settings(buildLevelSettings ++ minimalSettings: _*).
+  settings(
     publish := {},
     publishLocal := {}
   )
 
-// This is used to configure an sbt-launcher for this version of sbt.
-lazy val bundledLauncherProj =
-  (project in file("launch")).
+/* ** subproject declarations ** */
+
+// defines the Java interfaces through which the launcher and the launched application communicate
+lazy val launchInterfaceProj = (project in launchPath / "interface").
+  settings(minimalSettings ++ javaOnlySettings: _*).
   settings(
-    minimalSettings,
-    inConfig(Compile)(Transform.configSettings),
-    Release.launcherSettings(sbtLaunchJar)
+    name := "Launcher Interface"
+  )
+
+// the launcher.  Retrieves, loads, and runs applications based on a configuration file.
+lazy val launchProj = (project in launchPath).
+  dependsOn(ioProj % "test->test", interfaceProj % Test, launchInterfaceProj).
+  settings(testedBaseSettings: _*).
+  settings(
+    name := "Launcher",
+    libraryDependencies += ivy,
+    compile in Test <<= compile in Test dependsOn (publishLocal in interfaceProj, publishLocal in testSamples, publishLocal in launchInterfaceProj)
   ).
-  enablePlugins(SbtLauncherPlugin).
+  settings(inConfig(Compile)(Transform.configSettings): _*).
+  settings(inConfig(Compile)(Transform.transSourceSettings ++ Seq(
+    Transform.inputSourceDirectory <<= (sourceDirectory in crossProj) / "input_sources",
+    Transform.sourceProperties := Map("cross.package0" -> "xsbt", "cross.package1" -> "boot")
+  )): _*)
+
+// the proguarded launcher
+// the launcher is published with metadata so that the scripted plugin can pull it in
+// being proguarded, it shouldn't ever be on a classpath with other jars, however
+lazy val proguardedLauncherProj = (project in file("sbt-launch")).
+  configs(Proguard).
+  settings(minimalSettings ++ LaunchProguard.settings ++ LaunchProguard.specific(launchProj) ++
+    Release.launcherSettings(proguard in Proguard): _*).
   settings(
     name := "sbt-launch",
     moduleName := "sbt-launch",
     description := "sbt application launcher",
     publishArtifact in packageSrc := false,
     autoScalaLibrary := false,
-    publish := Release.deployLauncher.value,
-    publishLauncher := Release.deployLauncher.value,
-    packageBin in Compile := sbtLaunchJar.value
+    publish <<= Seq(publish, Release.deployLauncher).dependOn,
+    publishLauncher <<= Release.deployLauncher,
+    packageBin in Compile <<= proguard in Proguard
   )
 
-/* ** subproject declarations ** */
+// used to test the retrieving and loading of an application: sample app is packaged and published to the local repository
+lazy val testSamples = (project in launchPath / "test-sample").
+  dependsOn(interfaceProj, launchInterfaceProj).
+  settings(baseSettings ++ noPublishSettings: _*).
+  settings(
+    name := "Launch Test",
+    libraryDependencies += scalaCompiler.value
+  )
 
 // defines Java structures used across Scala versions, such as the API structures and relationships extracted by
 //   the analysis compiler phases and passed back to sbt.  The API structures are defined in a simple
 //   format from which Java sources are generated by the datatype generator Projproject
 lazy val interfaceProj = (project in file("interface")).
+  settings(minimalSettings ++ javaOnlySettings: _*).
   settings(
-    minimalSettings,
-    javaOnlySettings,
     name := "Interface",
     projectComponent,
     exportJars := true,
@@ -88,7 +125,8 @@ lazy val interfaceProj = (project in file("interface")).
     watchSources <++= apiDefinitions,
     resourceGenerators in Compile <+= (version, resourceManaged, streams, compile in Compile) map generateVersionFile,
     apiDefinitions <<= baseDirectory map { base => (base / "definition") :: (base / "other") :: (base / "type") :: Nil },
-    sourceGenerators in Compile <+= (apiDefinitions,
+    sourceGenerators in Compile <+= (cacheDirectory,
+      apiDefinitions,
       fullClasspath in Compile in datatypeProj,
       sourceManaged in Compile,
       mainClass in datatypeProj in Compile,
@@ -99,35 +137,32 @@ lazy val interfaceProj = (project in file("interface")).
 // defines operations on the API of a source, including determining whether it has changed and converting it to a string
 //   and discovery of Projclasses and annotations
 lazy val apiProj = (project in compilePath / "api").
-  dependsOn(interfaceProj, classfileProj).
+  dependsOn(interfaceProj).
+  settings(testedBaseSettings: _*).
   settings(
-    testedBaseSettings,
     name := "API"
   )
 
 /* **** Utilities **** */
 
 lazy val controlProj = (project in utilPath / "control").
+  settings(baseSettings ++ Util.crossBuild: _*).
   settings(
-    baseSettings,
-    Util.crossBuild,
     name := "Control",
     crossScalaVersions := Seq(scala210, scala211)
   )
 
 lazy val collectionProj = (project in utilPath / "collection").
+  settings(testedBaseSettings ++ Util.keywordsSettings ++ Util.crossBuild: _*).
   settings(
-    testedBaseSettings,
-    Util.keywordsSettings,
-    Util.crossBuild,
     name := "Collections",
     crossScalaVersions := Seq(scala210, scala211)
   )
 
 lazy val applyMacroProj = (project in utilPath / "appmacro").
   dependsOn(collectionProj).
+  settings(testedBaseSettings: _*).
   settings(
-    testedBaseSettings,
     name := "Apply Macro",
     libraryDependencies += scalaCompiler.value
   )
@@ -135,8 +170,8 @@ lazy val applyMacroProj = (project in utilPath / "appmacro").
 // The API for forking, combining, and doing I/O with system processes
 lazy val processProj = (project in utilPath / "process").
   dependsOn(ioProj % "test->test").
+  settings(baseSettings: _*).
   settings(
-    baseSettings,
     name := "Process",
     libraryDependencies ++= scalaXml.value
   )
@@ -144,9 +179,8 @@ lazy val processProj = (project in utilPath / "process").
 // Path, IO (formerly FileUtilities), NameFilter and other I/O utility classes
 lazy val ioProj = (project in utilPath / "io").
   dependsOn(controlProj).
+  settings(testedBaseSettings ++ Util.crossBuild: _*).
   settings(
-    testedBaseSettings,
-    Util.crossBuild,
     name := "IO",
     libraryDependencies += scalaCompiler.value % Test,
     crossScalaVersions := Seq(scala210, scala211)
@@ -154,19 +188,18 @@ lazy val ioProj = (project in utilPath / "io").
 
 // Utilities related to reflection, managing Scala versions, and custom class loaders
 lazy val classpathProj = (project in utilPath / "classpath").
-  dependsOn(interfaceProj, ioProj).
+  dependsOn(launchInterfaceProj, interfaceProj, ioProj).
+  settings(testedBaseSettings: _*).
   settings(
-    testedBaseSettings,
     name := "Classpath",
-    libraryDependencies ++= Seq(scalaCompiler.value,Dependencies.launcherInterface)
+    libraryDependencies += scalaCompiler.value
   )
 
 // Command line-related utilities.
 lazy val completeProj = (project in utilPath / "complete").
   dependsOn(collectionProj, controlProj, ioProj).
+  settings(testedBaseSettings ++ Util.crossBuild: _*).
   settings(
-    testedBaseSettings,
-    Util.crossBuild,
     name := "Completion",
     libraryDependencies += jline,
     crossScalaVersions := Seq(scala210, scala211)
@@ -175,49 +208,49 @@ lazy val completeProj = (project in utilPath / "complete").
 // logging
 lazy val logProj = (project in utilPath / "log").
   dependsOn(interfaceProj, processProj).
+  settings(testedBaseSettings: _*).
   settings(
-    testedBaseSettings,
     name := "Logging",
     libraryDependencies += jline
-  )
+  ) 
 
 // Relation
 lazy val relationProj = (project in utilPath / "relation").
   dependsOn(interfaceProj, processProj).
+  settings(testedBaseSettings: _*).
   settings(
-    testedBaseSettings,
     name := "Relation"
   )
 
 // class file reader and analyzer
 lazy val classfileProj = (project in utilPath / "classfile").
   dependsOn(ioProj, interfaceProj, logProj).
+  settings(testedBaseSettings: _*).
   settings(
-    testedBaseSettings,
     name := "Classfile"
   )
 
 // generates immutable or mutable Java data types according to a simple input format
 lazy val datatypeProj = (project in utilPath / "datatype").
   dependsOn(ioProj).
+  settings(baseSettings: _*).
   settings(
-    baseSettings,
     name := "Datatype Generator"
   )
 
 // cross versioning
 lazy val crossProj = (project in utilPath / "cross").
+  settings(baseSettings: _*).
+  settings(inConfig(Compile)(Transform.crossGenSettings): _*).
   settings(
-    baseSettings,
-    inConfig(Compile)(Transform.crossGenSettings),
     name := "Cross"
   )
 
 // A logic with restricted negation as failure for a unique, stable model
 lazy val logicProj = (project in utilPath / "logic").
   dependsOn(collectionProj, relationProj).
+  settings(testedBaseSettings: _*).
   settings(
-    testedBaseSettings,
     name := "Logic"
   )
 
@@ -225,26 +258,26 @@ lazy val logicProj = (project in utilPath / "logic").
 
 // Apache Ivy integration
 lazy val ivyProj = (project in file("ivy")).
-  dependsOn(interfaceProj, crossProj, logProj % "compile;test->test", ioProj % "compile;test->test", /*launchProj % "test->test",*/ collectionProj).
+  dependsOn(interfaceProj, launchInterfaceProj, crossProj, logProj % "compile;test->test", ioProj % "compile;test->test", launchProj % "test->test", collectionProj).
+  settings(baseSettings: _*).
   settings(
-    baseSettings,
     name := "Ivy",
-    libraryDependencies ++= Seq(ivy, jsch, sbtSerialization, scalaReflect.value, launcherInterface),
+    libraryDependencies ++= Seq(ivy, jsch, sbtSerialization),
     testExclusive)
 
 // Runner for uniform test interface
 lazy val testingProj = (project in file("testing")).
-  dependsOn(ioProj, classpathProj, logProj, testAgentProj).
+  dependsOn(ioProj, classpathProj, logProj, launchInterfaceProj, testAgentProj).
+  settings(baseSettings: _*).
   settings(
-    baseSettings,
     name := "Testing",
-    libraryDependencies ++= Seq(testInterface,launcherInterface)
+    libraryDependencies += testInterface
   )
 
 // Testing agent for running tests in a separate process.
 lazy val testAgentProj = (project in file("testing") / "agent").
+  settings(minimalSettings: _*).
   settings(
-    minimalSettings,
     name := "Test Agent",
     libraryDependencies += testInterface
   )
@@ -252,16 +285,16 @@ lazy val testAgentProj = (project in file("testing") / "agent").
 // Basic task engine
 lazy val taskProj = (project in tasksPath).
   dependsOn(controlProj, collectionProj).
+  settings(testedBaseSettings: _*).
   settings(
-    testedBaseSettings,
     name := "Tasks"
   )
 
 // Standard task system.  This provides map, flatMap, join, and more on top of the basic task model.
 lazy val stdTaskProj = (project in tasksPath / "standard").
   dependsOn (taskProj % "compile;test->test", collectionProj, logProj, ioProj, processProj).
+  settings(testedBaseSettings: _*).
   settings(
-    testedBaseSettings,
     name := "Task System",
     testExclusive
   )
@@ -269,35 +302,34 @@ lazy val stdTaskProj = (project in tasksPath / "standard").
 // Persisted caching based on SBinary
 lazy val cacheProj = (project in cachePath).
   dependsOn (ioProj, collectionProj).
+  settings(baseSettings: _*).
   settings(
-    baseSettings,
     name := "Cache",
-    libraryDependencies ++= Seq(sbinary, sbtSerialization, scalaReflect.value) ++ scalaXml.value
+    libraryDependencies ++= Seq(sbinary, sbtSerialization) ++ scalaXml.value
   )
 
 // Builds on cache to provide caching for filesystem-related operations
 lazy val trackingProj = (project in cachePath / "tracking").
   dependsOn(cacheProj, ioProj).
+  settings(baseSettings: _*).
   settings(
-    baseSettings,
     name := "Tracking"
   )
 
 // Embedded Scala code runner
 lazy val runProj = (project in file("run")).
   dependsOn (ioProj, logProj % "compile;test->test", classpathProj, processProj % "compile;test->test").
+  settings(testedBaseSettings: _*).
   settings(
-    testedBaseSettings,
     name := "Run"
   )
 
 // Compiler-side interface to compiler that is compiled against the compiler being used either in advance or on the fly.
 //   Includes API and Analyzer phases that extract source API and relationships.
 lazy val compileInterfaceProj = (project in compilePath / "interface").
-  dependsOn(interfaceProj % "compile;test->test", ioProj % "test->test", logProj % "test->test", /*launchProj % "test->test",*/ apiProj % "test->test").
+  dependsOn(interfaceProj % "compile;test->test", ioProj % "test->test", logProj % "test->test", launchProj % "test->test", apiProj % "test->test").
+  settings(baseSettings ++ precompiledSettings: _*).
   settings(
-    baseSettings,
-    libraryDependencies += scalaCompiler.value % "provided",
     name := "Compiler Interface",
     exportJars := true,
     // we need to fork because in unit tests we set usejavacp = true which means
@@ -307,72 +339,75 @@ lazy val compileInterfaceProj = (project in compilePath / "interface").
     // needed because we fork tests and tests are ran in parallel so we have multiple Scala
     // compiler instances that are memory hungry
     javaOptions in Test += "-Xmx1G",
-    publishArtifact in (Compile, packageSrc) := true
+    artifact in (Compile, packageSrc) := Artifact(srcID).copy(configurations = Compile :: Nil).extra("e:component" -> srcID)
   )
+
+lazy val precompiled282 = precompiled(scala282)
+lazy val precompiled292 = precompiled(scala292)
+lazy val precompiled293 = precompiled(scala293)
 
 // Implements the core functionality of detecting and propagating changes incrementally.
 //   Defines the data structures for representing file fingerprints and relationships and the overall source analysis
 lazy val compileIncrementalProj = (project in compilePath / "inc").
   dependsOn (apiProj, ioProj, logProj, classpathProj, relationProj).
+  settings(testedBaseSettings: _*).
   settings(
-    testedBaseSettings,
     name := "Incremental Compiler"
   )
 
 // Persists the incremental data structures using SBinary
 lazy val compilePersistProj = (project in compilePath / "persist").
   dependsOn(compileIncrementalProj, apiProj, compileIncrementalProj % "test->test").
+  settings(testedBaseSettings: _*).
   settings(
-    testedBaseSettings,
     name := "Persist",
     libraryDependencies += sbinary
   )
 
 // sbt-side interface to compiler.  Calls compiler-side interface reflectively
 lazy val compilerProj = (project in compilePath).
-  dependsOn(interfaceProj % "compile;test->test", logProj, ioProj, classpathProj, apiProj, classfileProj,
-    logProj % "test->test" /*,launchProj % "test->test" */).
+  dependsOn(launchInterfaceProj, interfaceProj % "compile;test->test", logProj, ioProj, classpathProj, apiProj, classfileProj,
+    logProj % "test->test", launchProj % "test->test").
+  settings(testedBaseSettings: _*).
   settings(
-    testedBaseSettings,
     name := "Compile",
-    libraryDependencies ++= Seq(scalaCompiler.value % Test, launcherInterface),
+    libraryDependencies += scalaCompiler.value % Test,
     unmanagedJars in Test <<= (packageSrc in compileInterfaceProj in Compile).map(x => Seq(x).classpath)
   )
 
 lazy val compilerIntegrationProj = (project in (compilePath / "integration")).
   dependsOn(compileIncrementalProj, compilerProj, compilePersistProj, apiProj, classfileProj).
+  settings(baseSettings: _*).
   settings(
-    baseSettings,
     name := "Compiler Integration"
   )
 
 lazy val compilerIvyProj = (project in compilePath / "ivy").
   dependsOn (ivyProj, compilerProj).
+  settings(baseSettings: _*).
   settings(
-    baseSettings,
     name := "Compiler Ivy Integration"
   )
 
 lazy val scriptedBaseProj = (project in scriptedPath / "base").
   dependsOn (ioProj, processProj).
+  settings(testedBaseSettings: _*).
   settings(
-    testedBaseSettings,
     name := "Scripted Framework",
     libraryDependencies ++= scalaParsers.value
   )
 
 lazy val scriptedSbtProj = (project in scriptedPath / "sbt").
   dependsOn (ioProj, logProj, processProj, scriptedBaseProj, interfaceProj).
+  settings(baseSettings: _*).
   settings(
-    baseSettings,
-    name := "Scripted sbt",
-    libraryDependencies += launcherInterface % "provided"
+    name := "Scripted sbt"
   )
 
 lazy val scriptedPluginProj = (project in scriptedPath / "plugin").
   dependsOn (sbtProj, classpathProj).
+  settings(baseSettings: _*).
   settings(
-    baseSettings,
     name := "Scripted Plugin"
   )
 
@@ -381,69 +416,68 @@ lazy val actionsProj = (project in mainPath / "actions").
   dependsOn (classpathProj, completeProj, apiProj, compilerIntegrationProj, compilerIvyProj,
     interfaceProj, ioProj, ivyProj, logProj, processProj, runProj, relationProj, stdTaskProj,
     taskProj, trackingProj, testingProj).
+  settings(testedBaseSettings: _*).
   settings(
-    testedBaseSettings,
     name := "Actions"
   )
 
 // General command support and core commands not specific to a build system
 lazy val commandProj = (project in mainPath / "command").
-  dependsOn(interfaceProj, ioProj, logProj, completeProj, classpathProj, crossProj).
+  dependsOn(interfaceProj, ioProj, launchInterfaceProj, logProj, completeProj, classpathProj, crossProj).
+  settings(testedBaseSettings: _*).
   settings(
-    testedBaseSettings,
-    name := "Command",
-    libraryDependencies += launcherInterface
+    name := "Command"
   )
 
 // Fixes scope=Scope for Setting (core defined in collectionProj) to define the settings system used in build definitions
 lazy val mainSettingsProj = (project in mainPath / "settings").
   dependsOn (applyMacroProj, interfaceProj, ivyProj, relationProj, logProj, ioProj, commandProj,
     completeProj, classpathProj, stdTaskProj, processProj).
+  settings(testedBaseSettings: _*).
   settings(
-    testedBaseSettings,
     name := "Main Settings",
     libraryDependencies += sbinary
   )
 
 // The main integration project for sbt.  It brings all of the Projsystems together, configures them, and provides for overriding conventions.
 lazy val mainProj = (project in mainPath).
-  dependsOn (actionsProj, mainSettingsProj, interfaceProj, ioProj, ivyProj, logProj, logicProj, processProj, runProj, commandProj).
+  dependsOn (actionsProj, mainSettingsProj, interfaceProj, ioProj, ivyProj, launchInterfaceProj, logProj, logicProj, processProj, runProj, commandProj).
+  settings(testedBaseSettings: _*).
   settings(
-    testedBaseSettings,
     name := "Main",
-    libraryDependencies ++= scalaXml.value ++ Seq(launcherInterface)
+    libraryDependencies ++= scalaXml.value
   )
 
 // Strictly for bringing implicits and aliases from subsystems into the top-level sbt namespace through a single package object
 //  technically, we need a dependency on all of mainProj's dependencies, but we don't do that since this is strictly an integration project
 //  with the sole purpose of providing certain identifiers without qualification (with a package object)
 lazy val sbtProj = (project in sbtPath).
-  dependsOn(mainProj, compileInterfaceProj, scriptedSbtProj % "test->test").
+  dependsOn(mainProj, compileInterfaceProj, precompiled282, precompiled292, precompiled293, scriptedSbtProj % "test->test").
+  settings(baseSettings: _*).
   settings(
-    baseSettings,
     name := "sbt",
     normalizedName := "sbt"
   )
 
 lazy val mavenResolverPluginProj = (project in file("sbt-maven-resolver")).
   dependsOn(sbtProj, ivyProj % "test->test").
+  settings(baseSettings: _*).
   settings(
-    baseSettings,
     name := "sbt-maven-resolver",
     libraryDependencies ++= aetherLibs,
     sbtPlugin := true
   )
 
-def scriptedTask: Def.Initialize[InputTask[Unit]] = Def.inputTask {
+def scriptedTask: Initialize[InputTask[Unit]] = Def.inputTask {
   val result = scriptedSource(dir => (s: State) => scriptedParser(dir)).parsed
   publishAll.value
-  doScripted((sbtLaunchJar in bundledLauncherProj).value, (fullClasspath in scriptedSbtProj in Test).value,
+  doScripted((proguard in Proguard in proguardedLauncherProj).value, (fullClasspath in scriptedSbtProj in Test).value,
     (scalaInstance in scriptedSbtProj).value, scriptedSource.value, result, scriptedPrescripted.value)
 }
 
-def scriptedUnpublishedTask: Def.Initialize[InputTask[Unit]] = Def.inputTask {
+def scriptedUnpublishedTask: Initialize[InputTask[Unit]] = Def.inputTask {
   val result = scriptedSource(dir => (s: State) => scriptedParser(dir)).parsed
-  doScripted((sbtLaunchJar in bundledLauncherProj).value, (fullClasspath in scriptedSbtProj in Test).value,
+  doScripted((proguard in Proguard in proguardedLauncherProj).value, (fullClasspath in scriptedSbtProj in Test).value,
     (scalaInstance in scriptedSbtProj).value, scriptedSource.value, result, scriptedPrescripted.value)
 }
 
@@ -452,30 +486,30 @@ lazy val publishLauncher = TaskKey[Unit]("publish-launcher")
 
 lazy val myProvided = config("provided") intransitive
 
-def allProjects = Seq(interfaceProj, apiProj,
+def allProjects = Seq(launchInterfaceProj, launchProj, proguardedLauncherProj,
+  testSamples, interfaceProj, apiProj,
   controlProj, collectionProj, applyMacroProj, processProj, ioProj, classpathProj, completeProj,
   logProj, relationProj, classfileProj, datatypeProj, crossProj, logicProj, ivyProj,
   testingProj, testAgentProj, taskProj, stdTaskProj, cacheProj, trackingProj, runProj,
   compileInterfaceProj, compileIncrementalProj, compilePersistProj, compilerProj,
   compilerIntegrationProj, compilerIvyProj,
   scriptedBaseProj, scriptedSbtProj, scriptedPluginProj,
-  actionsProj, commandProj, mainSettingsProj, mainProj, sbtProj, bundledLauncherProj, mavenResolverPluginProj)
+  actionsProj, commandProj, mainSettingsProj, mainProj, sbtProj, mavenResolverPluginProj)
 
 def projectsWithMyProvided = allProjects.map(p => p.copy(configurations = (p.configurations.filter(_ != Provided)) :+ myProvided))
 lazy val nonRoots = projectsWithMyProvided.map(p => LocalProject(p.id))
 
-def rootSettings = fullDocSettings ++
+def rootSettings = Release.releaseSettings ++ fullDocSettings ++
   Util.publishPomSettings ++ otherRootSettings ++ Formatting.sbtFilesSettings ++
-  Transform.conscriptSettings(bundledLauncherProj)
+  Transform.conscriptSettings(launchProj)
 def otherRootSettings = Seq(
   Scripted.scriptedPrescripted := { _ => },
   Scripted.scripted <<= scriptedTask,
   Scripted.scriptedUnpublished <<= scriptedUnpublishedTask,
-  Scripted.scriptedSource := (sourceDirectory in sbtProj).value / "sbt-test",
+  Scripted.scriptedSource <<= (sourceDirectory in sbtProj) / "sbt-test",
   publishAll := {
     val _ = (publishLocal).all(ScopeFilter(inAnyProject)).value
-  },
-  aggregate in bintrayRelease := false
+  }
 ) ++ inConfig(Scripted.MavenResolverPluginTest)(Seq(
   Scripted.scripted <<= scriptedTask,
   Scripted.scriptedUnpublished <<= scriptedUnpublishedTask,
@@ -488,7 +522,7 @@ def otherRootSettings = Seq(
   }
 ))
 lazy val docProjects: ScopeFilter = ScopeFilter(
-  inAnyProject -- inProjects(sbtRoot, sbtProj, scriptedBaseProj, scriptedSbtProj, scriptedPluginProj, mavenResolverPluginProj),
+  inAnyProject -- inProjects(root, sbtProj, scriptedBaseProj, scriptedSbtProj, scriptedPluginProj, precompiled282, precompiled292, precompiled293, mavenResolverPluginProj),
   inConfigurations(Compile)
 )
 def fullDocSettings = Util.baseScalacOptions ++ Docs.settings ++ Sxr.settings ++ Seq(
@@ -515,28 +549,40 @@ def utilPath   = file("util")
 def compilePath = file("compile")
 def mainPath   = file("main")
 
+def precompiledSettings = Seq(
+  artifact in packageBin <<= (appConfiguration, scalaVersion) { (app, sv) =>
+    val launcher = app.provider.scalaProvider.launcher
+    val bincID = binID + "_" + ScalaInstance(sv, launcher).actualVersion
+    Artifact(binID) extra ("e:component" -> bincID)
+  },
+  target <<= (target, scalaVersion) { (base, sv) => base / ("precompiled_" + sv) },
+  scalacOptions := Nil,
+  ivyScala ~= { _.map(_.copy(checkExplicit = false, overrideScalaVersion = false)) },
+  exportedProducts in Compile := Nil,
+  libraryDependencies += scalaCompiler.value % "provided"
+)
+
+def precompiled(scalav: String): Project = Project(id = normalize("Precompiled " + scalav.replace('.', '_')), base = compilePath / "interface").
+  dependsOn(interfaceProj).
+  settings(baseSettings ++ precompiledSettings: _*).
+  settings(
+    name := "Precompiled " + scalav.replace('.', '_'),
+    scalaHome := None,
+    scalaVersion <<= (scalaVersion in ThisBuild) { sbtScalaV =>
+      assert(sbtScalaV != scalav, "Precompiled compiler interface cannot have the same Scala version (" + scalav + ") as sbt.")
+      scalav
+    },
+    crossScalaVersions := Seq(scalav),
+    // we disable compiling and running tests in precompiled Projprojects of compiler interface
+    // so we do not need to worry about cross-versioning testing dependencies
+    sources in Test := Nil
+  )
+
 lazy val safeUnitTests = taskKey[Unit]("Known working tests (for both 2.10 and 2.11)")
 lazy val safeProjects: ScopeFilter = ScopeFilter(
-  inProjects(mainSettingsProj, mainProj, ivyProj, completeProj,
+  inProjects(launchProj, mainSettingsProj, mainProj, ivyProj, completeProj,
     actionsProj, classpathProj, collectionProj, compileIncrementalProj,
-    logProj, runProj, stdTaskProj, compilerProj),
-  inConfigurations(Test)
-)
-lazy val otherUnitTests = taskKey[Unit]("Unit test other projects")
-lazy val otherProjects: ScopeFilter = ScopeFilter(
-  inProjects(interfaceProj, apiProj, controlProj, 
-    applyMacroProj,
-    // processProj, // this one is suspicious
-    ioProj,
-    relationProj, classfileProj, datatypeProj,
-    crossProj, logicProj, testingProj, testAgentProj, taskProj,
-    cacheProj, trackingProj,
-    compileIncrementalProj,
-    compilePersistProj, compilerProj,
-    compilerIntegrationProj, compilerIvyProj,
-    scriptedBaseProj, scriptedSbtProj, scriptedPluginProj,
-    commandProj, mainSettingsProj, mainProj,
-    sbtProj, mavenResolverPluginProj),
+    logProj, runProj, stdTaskProj),
   inConfigurations(Test)
 )
 
@@ -557,11 +603,11 @@ def customCommands: Seq[Setting[_]] = Seq(
   safeUnitTests := {
     test.all(safeProjects).value
   },
-  otherUnitTests := {
-    test.all(otherProjects)
-  },
   commands += Command.command("release-sbt-local") { state =>
     "clean" ::
+    "allPrecompiled/clean" ::
+    "allPrecompiled/compile" ::
+    "allPrecompiled/publishLocal" ::
     "so compile" ::
     "so publishLocal" ::
     "reload" ::
@@ -569,30 +615,42 @@ def customCommands: Seq[Setting[_]] = Seq(
   },
   /** There are several complications with sbt's build.
    * First is the fact that interface project is a Java-only project
-   * that uses source generator from datatype subproject in Scala 2.10.5.
+   * that uses source generator from datatype subproject in Scala 2.10.4,
+   * which is depended on by Scala 2.8.2, Scala 2.9.2, and Scala 2.9.3 precompiled project. 
    *
-   * Second is the fact that all subprojects are released with crossPaths
-   * turned off for the sbt's Scala version 2.10.5, but some of them are also
+   * Second is the fact that sbt project (currently using Scala 2.10.4) depends on
+   * the precompiled projects (that uses Scala 2.8.2 etc.)
+   * 
+   * Finally, there's the fact that all subprojects are released with crossPaths
+   * turned off for the sbt's Scala version 2.10.4, but some of them are also
    * cross published against 2.11.1 with crossPaths turned on.
    *
-   * `so compile` handles 2.10.x/2.11.x cross building.
+   * Because of the way ++ (and its improved version wow) is implemented
+   * precompiled compiler briges are handled outside of doge aggregation on root.
+   * `so compile` handles 2.10.x/2.11.x cross building. 
    */
   commands += Command.command("release-sbt") { state =>
     // TODO - Any sort of validation
+    "checkCredentials" ::
     "clean" ::
+    "allPrecompiled/clean" ::
+      "allPrecompiled/compile" ::
+      "allPrecompiled/publishSigned" ::
       "conscript-configs" ::
       "so compile" ::
       "so publishSigned" ::
-      "bundledLauncherProj/publishLauncher" ::
+      "publishLauncher" ::
       state
   },
   // stamp-version doesn't work with ++ or "so".
   commands += Command.command("release-nightly") { state =>
     "stamp-version" ::
       "clean" ::
+      "allPrecompiled/clean" ::
+      "allPrecompiled/compile" ::
+      "allPrecompiled/publish" ::
       "compile" ::
       "publish" ::
-      "bintrayRelease" ::
       state
   }
 )

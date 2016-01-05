@@ -21,61 +21,8 @@ import org.apache.ivy.core.settings.IvySettings
 import org.apache.ivy.core.module.descriptor.{ DependencyArtifactDescriptor, DependencyDescriptor, License, ModuleDescriptor, ExcludeRule }
 import org.apache.ivy.plugins.resolver.{ ChainResolver, DependencyResolver, IBiblioResolver }
 import ivyint.CustomRemoteMavenResolver
-object MakePom {
-  /** True if the revision is an ivy-range, not a complete revision. */
-  def isDependencyVersionRange(revision: String): Boolean = {
-    (revision endsWith "+") ||
-      (revision contains "[") ||
-      (revision contains "]") ||
-      (revision contains "(") ||
-      (revision contains ")")
-  }
 
-  /** Converts Ivy revision ranges to that of Maven POM */
-  def makeDependencyVersion(revision: String): String = {
-    def plusRange(s: String, shift: Int = 0) = {
-      def pow(i: Int): Int = if (i > 0) 10 * pow(i - 1) else 1
-      val (prefixVersion, lastVersion) = (s + "0" * shift).reverse.split("\\.", 2) match {
-        case Array(revLast, revRest) =>
-          (revRest.reverse + ".", revLast.reverse)
-        case Array(revLast) => ("", revLast.reverse)
-      }
-      val lastVersionInt = lastVersion.toInt
-      s"[${prefixVersion}${lastVersion},${prefixVersion}${lastVersionInt + pow(shift)})"
-    }
-    val startSym = Set(']', '[', '(')
-    val stopSym = Set(']', '[', ')')
-    val DotPlusPattern = """(.+)\.\+""".r
-    val DotNumPlusPattern = """(.+)\.(\d+)\+""".r
-    val NumPlusPattern = """(\d+)\+""".r
-    val maxDigit = 5
-    try {
-      revision match {
-        case "+"                           => "[0,)"
-        case DotPlusPattern(base)          => plusRange(base)
-        // This is a heuristic.  Maven just doesn't support Ivy's notions of 1+, so
-        // we assume version ranges never go beyond 5 siginificant digits.
-        case NumPlusPattern(tail)          => (0 until maxDigit).map(plusRange(tail, _)).mkString(",")
-        case DotNumPlusPattern(base, tail) => (0 until maxDigit).map(plusRange(base + "." + tail, _)).mkString(",")
-        case rev if rev endsWith "+"       => sys.error(s"dynamic revision '$rev' cannot be translated to POM")
-        case rev if startSym(rev(0)) && stopSym(rev(rev.length - 1)) =>
-          val start = rev(0)
-          val stop = rev(rev.length - 1)
-          val mid = rev.substring(1, rev.length - 1)
-          (if (start == ']') "(" else start) + mid + (if (stop == '[') ")" else stop)
-        case _ => revision
-      }
-    } catch {
-      case e: NumberFormatException =>
-        // TODO - if the version doesn't meet our expectations, maybe we just issue a hard
-        //        error instead of softly ignoring the attempt to rewrite.
-        //sys.error(s"Could not fix version [$revision] into maven style version")
-        revision
-    }
-  }
-}
 class MakePom(val log: Logger) {
-  import MakePom._
   @deprecated("Use `write(Ivy, ModuleDescriptor, ModuleInfo, Option[Iterable[Configuration]], Set[String], NodeSeq, XNode => XNode, MavenRepository => Boolean, Boolean, File)` instead", "0.11.2")
   def write(ivy: Ivy, module: ModuleDescriptor, moduleInfo: ModuleInfo, configurations: Option[Iterable[Configuration]], extra: NodeSeq, process: XNode => XNode, filterRepositories: MavenRepository => Boolean, allRepositories: Boolean, output: File): Unit =
     write(ivy, module, moduleInfo: ModuleInfo, configurations: Option[Iterable[Configuration]], Set(Artifact.DefaultType), extra, process, filterRepositories, allRepositories, output)
@@ -103,7 +50,7 @@ class MakePom(val log: Logger) {
        {
          val deps = depsInConfs(module, configurations)
          makeProperties(module, deps) ++
-           makeDependencies(deps, includeTypes, module.getAllExcludeRules)
+           makeDependencies(deps, includeTypes)
        }
        { makeRepositories(ivy.getSettings, allRepositories, filterRepositories) }
      </project>)
@@ -161,15 +108,13 @@ class MakePom(val log: Logger) {
     {
       if (moduleInfo.developers.nonEmpty) {
         <developers>
-          {
-            moduleInfo.developers.map { developer: Developer =>
-              <developer>
-                <id>{ developer.id }</id>
-                <name>{ developer.name }</name>
-                <email>{ developer.email }</email>
-                <url>{ developer.url }</url>
-              </developer>
-            }
+          moduleInfo.developers.map{ developer: Developer =>
+            <developer>
+              <id>{ developer.id }</id>
+              <name>{ developer.name }</name>
+              <email>{ developer.email }</email>
+              <url>{ developer.url }</url>
+            </developer>
           }
         </developers>
       } else NodeSeq.Empty
@@ -219,74 +164,43 @@ class MakePom(val log: Logger) {
     }
   val IgnoreTypes: Set[String] = Set(Artifact.SourceType, Artifact.DocType, Artifact.PomType)
 
-  @deprecated("Use `makeDependencies` variant which takes excludes", "0.13.9")
   def makeDependencies(dependencies: Seq[DependencyDescriptor], includeTypes: Set[String]): NodeSeq =
-    makeDependencies(dependencies, includeTypes, Nil)
-
-  def makeDependencies(dependencies: Seq[DependencyDescriptor], includeTypes: Set[String], excludes: Seq[ExcludeRule]): NodeSeq =
     if (dependencies.isEmpty)
       NodeSeq.Empty
     else
       <dependencies>
-        { dependencies.map(makeDependency(_, includeTypes, excludes)) }
+        { dependencies.map(makeDependency(_, includeTypes)) }
       </dependencies>
 
-  @deprecated("Use `makeDependency` variant which takes excludes", "0.13.9")
   def makeDependency(dependency: DependencyDescriptor, includeTypes: Set[String]): NodeSeq =
-    makeDependency(dependency, includeTypes, Nil)
-
-  def makeDependency(dependency: DependencyDescriptor, includeTypes: Set[String], excludes: Seq[ExcludeRule]): NodeSeq = {
-    def warnIntransitve(): Unit =
-      if (!dependency.isTransitive)
-        log.warn(
-          s"""Translating intransitive dependency (${dependency.getDependencyId}) into pom.xml, but maven does not support intransitive dependencies.
-             |  Please use exclusions instead so transitive dependencies will be correctly excluded in dependent projects.
-           """.stripMargin)
-      else ()
-    val artifacts = dependency.getAllDependencyArtifacts
-    val includeArtifacts = artifacts.filter(d => includeTypes(d.getType))
-    if (artifacts.isEmpty) {
-      val configs = dependency.getModuleConfigurations
-      if (!configs.forall(Set("sources", "docs"))) {
-        warnIntransitve()
+    {
+      val artifacts = dependency.getAllDependencyArtifacts
+      val includeArtifacts = artifacts.filter(d => includeTypes(d.getType))
+      if (artifacts.isEmpty) {
         val (scope, optional) = getScopeAndOptional(dependency.getModuleConfigurations)
-        makeDependencyElem(dependency, scope, optional, None, None, excludes)
-      } else NodeSeq.Empty
-    } else if (includeArtifacts.isEmpty) {
-      NodeSeq.Empty
-    } else {
-      warnIntransitve()
-      NodeSeq.fromSeq(artifacts.flatMap(a => makeDependencyElem(dependency, a, excludes)))
+        makeDependencyElem(dependency, scope, optional, None, None)
+      } else if (includeArtifacts.isEmpty)
+        NodeSeq.Empty
+      else
+        NodeSeq.fromSeq(artifacts.map(a => makeDependencyElem(dependency, a)))
     }
-  }
 
-  @deprecated("Use `makeDependencyElem` variant which takes excludes", "0.13.9")
-  def makeDependencyElem(dependency: DependencyDescriptor, artifact: DependencyArtifactDescriptor): Option[Elem] =
-    makeDependencyElem(dependency, artifact, Nil)
-
-  def makeDependencyElem(dependency: DependencyDescriptor, artifact: DependencyArtifactDescriptor, excludes: Seq[ExcludeRule]): Option[Elem] =
+  def makeDependencyElem(dependency: DependencyDescriptor, artifact: DependencyArtifactDescriptor): Elem =
     {
       val configs = artifact.getConfigurations.toList match {
         case Nil | "*" :: Nil => dependency.getModuleConfigurations
         case x                => x.toArray
       }
-      if (!configs.forall(Set("sources", "docs"))) {
-        val (scope, optional) = getScopeAndOptional(configs)
-        val classifier = artifactClassifier(artifact)
-        val baseType = artifactType(artifact)
-        val tpe = (classifier, baseType) match {
-          case (Some(c), Some(tpe)) if Artifact.classifierType(c) == tpe => None
-          case _ => baseType
-        }
-        Some(makeDependencyElem(dependency, scope, optional, classifier, tpe, excludes))
-      } else None
+      val (scope, optional) = getScopeAndOptional(configs)
+      val classifier = artifactClassifier(artifact)
+      val baseType = artifactType(artifact)
+      val tpe = (classifier, baseType) match {
+        case (Some(c), Some(tpe)) if Artifact.classifierType(c) == tpe => None
+        case _ => baseType
+      }
+      makeDependencyElem(dependency, scope, optional, classifier, tpe)
     }
-
-  @deprecated("Use `makeDependencyElem` variant which takes excludes", "0.13.9")
   def makeDependencyElem(dependency: DependencyDescriptor, scope: Option[String], optional: Boolean, classifier: Option[String], tpe: Option[String]): Elem =
-    makeDependencyElem(dependency, scope, optional, classifier, tpe, Nil)
-
-  def makeDependencyElem(dependency: DependencyDescriptor, scope: Option[String], optional: Boolean, classifier: Option[String], tpe: Option[String], excludes: Seq[ExcludeRule]): Elem =
     {
       val mrid = dependency.getDependencyRevisionId
       <dependency>
@@ -297,9 +211,52 @@ class MakePom(val log: Logger) {
         { optionalElem(optional) }
         { classifierElem(classifier) }
         { typeElem(tpe) }
-        { exclusions(dependency, excludes) }
+        { exclusions(dependency) }
       </dependency>
     }
+
+  /** Converts Ivy revision ranges to that of Maven POM */
+  def makeDependencyVersion(revision: String): String = {
+    def plusRange(s: String, shift: Int = 0) = {
+      def pow(i: Int): Int = if (i > 0) 10 * pow(i - 1) else 1
+      val (prefixVersion, lastVersion) = (s + "0" * shift).reverse.split("\\.", 2) match {
+        case Array(revLast, revRest) =>
+          (revRest.reverse + ".", revLast.reverse)
+        case Array(revLast) => ("", revLast.reverse)
+      }
+      val lastVersionInt = lastVersion.toInt
+      s"[${prefixVersion}${lastVersion},${prefixVersion}${lastVersionInt + pow(shift)})"
+    }
+    val startSym = Set(']', '[', '(')
+    val stopSym = Set(']', '[', ')')
+    val DotPlusPattern = """(.+)\.\+""".r
+    val DotNumPlusPattern = """(.+)\.(\d+)\+""".r
+    val NumPlusPattern = """(\d+)\+""".r
+    val maxDigit = 5
+    try {
+      revision match {
+        case "+"                           => "[0,)"
+        case DotPlusPattern(base)          => plusRange(base)
+        // This is a heuristic.  Maven just doesn't support Ivy's notions of 1+, so
+        // we assume version ranges never go beyond 5 siginificant digits.
+        case NumPlusPattern(tail)          => (0 until maxDigit).map(plusRange(tail, _)).mkString(",")
+        case DotNumPlusPattern(base, tail) => (0 until maxDigit).map(plusRange(base + "." + tail, _)).mkString(",")
+        case rev if rev endsWith "+"       => sys.error(s"dynamic revision '$rev' cannot be translated to POM")
+        case rev if startSym(rev(0)) && stopSym(rev(rev.length - 1)) =>
+          val start = rev(0)
+          val stop = rev(rev.length - 1)
+          val mid = rev.substring(1, rev.length - 1)
+          (if (start == ']') "(" else start) + mid + (if (stop == '[') ")" else stop)
+        case _ => revision
+      }
+    } catch {
+      case e: NumberFormatException =>
+        // TODO - if the version doesn't meet our expectations, maybe we just issue a hard
+        //        error instead of softly ignoring the attempt to rewrite.
+        //sys.error(s"Could not fix version [$revision] into maven style version")
+        revision
+    }
+  }
 
   @deprecated("No longer used and will be removed.", "0.12.1")
   def classifier(dependency: DependencyDescriptor, includeTypes: Set[String]): NodeSeq =
@@ -347,12 +304,9 @@ class MakePom(val log: Logger) {
       (scope, opt.nonEmpty)
     }
 
-  @deprecated("Use `exclusions` variant which takes excludes", "0.13.9")
-  def exclusions(dependency: DependencyDescriptor): NodeSeq = exclusions(dependency, Nil)
-
-  def exclusions(dependency: DependencyDescriptor, excludes: Seq[ExcludeRule]): NodeSeq =
+  def exclusions(dependency: DependencyDescriptor): NodeSeq =
     {
-      val excl = dependency.getExcludeRules(dependency.getModuleConfigurations) ++ excludes
+      val excl = dependency.getExcludeRules(dependency.getModuleConfigurations)
       val (warns, excls) = IvyUtil.separate(excl.map(makeExclusion))
       if (warns.nonEmpty) log.warn(warns.mkString(IO.Newline))
       if (excls.nonEmpty) <exclusions>{ excls }</exclusions>
@@ -379,9 +333,6 @@ class MakePom(val log: Logger) {
       val repositories = if (includeAll) allResolvers(settings) else resolvers(settings.getDefaultResolver)
       val mavenRepositories =
         repositories.flatMap {
-          // TODO - Would it be ok if bintray were in the pom?   We should avoid it for now.
-          case m: CustomRemoteMavenResolver if m.repo.root == JCenterRepository.root         => Nil
-          case m: IBiblioResolver if m.isM2compatible && m.getRoot == JCenterRepository.root => Nil
           case m: CustomRemoteMavenResolver if m.repo.root != DefaultMavenRepository.root =>
             MavenRepository(m.repo.name, m.repo.root) :: Nil
           case m: IBiblioResolver if m.isM2compatible && m.getRoot != DefaultMavenRepository.root =>

@@ -4,6 +4,7 @@ import Path._, Configurations._
 import java.io.File
 import org.specs2._
 import cross.CrossVersionUtil
+import sbt.PublishConfiguration
 import sbt.ivyint.SbtChainResolver
 
 trait BaseIvySpecification extends Specification {
@@ -53,14 +54,10 @@ trait BaseIvySpecification extends Specification {
 
   def ivyUpdateEither(module: IvySbt#Module): Either[UnresolvedWarning, UpdateReport] = {
     // IO.delete(currentTarget)
-    val retrieveConfig = new RetrieveConfiguration(currentManaged, Resolver.defaultRetrievePattern, false)
+    val retrieveConfig = new RetrieveConfiguration(currentManaged, Resolver.defaultRetrievePattern)
     val config = new UpdateConfiguration(Some(retrieveConfig), false, UpdateLogging.Full)
     IvyActions.updateEither(module, config, UnresolvedWarningConfiguration(), LogicalClock.unknown, Some(currentDependency), log)
   }
-
-  def cleanIvyCache(): Unit = IO.delete(currentTarget / "cache")
-
-  def cleanCachedResolutionCache(module: IvySbt#Module): Unit = IvyActions.cleanCachedResolutionCache(module, log)
 
   def ivyUpdate(module: IvySbt#Module) =
     ivyUpdateEither(module) match {

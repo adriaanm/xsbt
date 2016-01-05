@@ -3,7 +3,6 @@
  */
 package sbt
 
-import scala.concurrent.duration.Duration
 import java.io.File
 import Def.{ displayFull, dummyState, ScopedKey, Setting }
 import Keys.{ streams, Streams, TaskStreams }
@@ -57,7 +56,6 @@ object TaskCancellationStrategy {
     type State = Unit
     def onTaskEngineStart(canceller: RunningTaskEngine): Unit = ()
     def onTaskEngineFinish(state: Unit): Unit = ()
-    override def toString: String = "Null"
   }
   /** Cancel handler which registers for SIGINT and cancels tasks when it is received. */
   object Signal extends TaskCancellationStrategy {
@@ -67,7 +65,6 @@ object TaskCancellationStrategy {
     }
     def onTaskEngineFinish(registration: Signals.Registration): Unit =
       registration.remove()
-    override def toString: String = "Signal"
   }
 }
 
@@ -84,16 +81,16 @@ sealed trait EvaluateTaskConfig {
   def progressReporter: ExecuteProgress[Task]
   def cancelStrategy: TaskCancellationStrategy
   /**
-   * If true, we force a finalizer/gc run (or two) after task execution completes when needed.
+   * If true, we force a finalizer/gc run (or two) after task execution completes.
+   * This helps in instances where
    */
   def forceGarbageCollection: Boolean
-
-  /**
-   * Interval to force GC.
-   */
-  def minForcegcInterval: Duration
 }
 final object EvaluateTaskConfig {
+  // Returns the default force garbage collection flag,
+  // as specified by system properties.
+  private[sbt] def defaultForceGarbageCollection: Boolean =
+    sys.props.get("sbt.task.forcegc").map(java.lang.Boolean.parseBoolean).getOrElse(false)
   /** Pulls in the old configuration format. */
   def apply(old: EvaluateConfig): EvaluateTaskConfig = {
     object AdaptedTaskConfig extends EvaluateTaskConfig {
@@ -103,41 +100,27 @@ final object EvaluateTaskConfig {
       def cancelStrategy: TaskCancellationStrategy =
         if (old.cancelable) TaskCancellationStrategy.Signal
         else TaskCancellationStrategy.Null
-      def forceGarbageCollection = GCUtil.defaultForceGarbageCollection
-      def minForcegcInterval = GCUtil.defaultMinForcegcInterval
+      def forceGarbageCollection = defaultForceGarbageCollection
     }
     AdaptedTaskConfig
   }
-
-  @deprecated("Use the alternative that specifies minForcegcInterval", "0.13.9")
-  def apply(restrictions: Seq[Tags.Rule],
-    checkCycles: Boolean,
-    progressReporter: ExecuteProgress[Task],
-    cancelStrategy: TaskCancellationStrategy,
-    forceGarbageCollection: Boolean): EvaluateTaskConfig =
-    apply(restrictions, checkCycles, progressReporter, cancelStrategy, forceGarbageCollection,
-      GCUtil.defaultMinForcegcInterval)
-
   /** Raw constructor for EvaluateTaskConfig. */
   def apply(restrictions: Seq[Tags.Rule],
     checkCycles: Boolean,
     progressReporter: ExecuteProgress[Task],
     cancelStrategy: TaskCancellationStrategy,
-    forceGarbageCollection: Boolean,
-    minForcegcInterval: Duration): EvaluateTaskConfig = {
+    forceGarbageCollection: Boolean): EvaluateTaskConfig = {
     val r = restrictions
     val check = checkCycles
     val cs = cancelStrategy
     val pr = progressReporter
     val fgc = forceGarbageCollection
-    val mfi = minForcegcInterval
     object SimpleEvaluateTaskConfig extends EvaluateTaskConfig {
       def restrictions = r
       def checkCycles = check
       def progressReporter = pr
       def cancelStrategy = cs
       def forceGarbageCollection = fgc
-      def minForcegcInterval = mfi
     }
     SimpleEvaluateTaskConfig
   }
@@ -197,8 +180,7 @@ object EvaluateTask {
       val canceller = cancelStrategy(extracted, structure, state)
       val progress = executeProgress(extracted, structure, state)
       val fgc = forcegc(extracted, structure)
-      val mfi = minForcegcInterval(extracted, structure)
-      EvaluateTaskConfig(rs, false, progress, canceller, fgc, mfi)
+      EvaluateTaskConfig(rs, false, progress, canceller, fgc)
     }
 
   def defaultRestrictions(maxWorkers: Int) = Tags.limitAll(maxWorkers) :: Nil
@@ -229,10 +211,7 @@ object EvaluateTask {
   }
   // TODO - Should this pull from Global or from the project itself?
   private[sbt] def forcegc(extracted: Extracted, structure: BuildStructure): Boolean =
-    getSetting(Keys.forcegc in Global, GCUtil.defaultForceGarbageCollection, extracted, structure)
-  // TODO - Should this pull from Global or from the project itself?
-  private[sbt] def minForcegcInterval(extracted: Extracted, structure: BuildStructure): Duration =
-    getSetting(Keys.minForcegcInterval in Global, GCUtil.defaultMinForcegcInterval, extracted, structure)
+    getSetting(Keys.forcegc in Global, EvaluateTaskConfig.defaultForceGarbageCollection, extracted, structure)
 
   def getSetting[T](key: SettingKey[T], default: T, extracted: Extracted, structure: BuildStructure): T =
     key in extracted.currentRef get structure.data getOrElse default
@@ -271,7 +250,7 @@ object EvaluateTask {
    * If the task is not defined, None is returned.  The provided task key is resolved against the current project `ref`.
    * `config` configures concurrency and canceling of task execution.
    */
-  @deprecated("Use EvaluateTaskConfig option instead.", "0.13.5")
+  @deprecated("Use EvalauteTaskConfig option instead.", "0.13.5")
   def apply[T](structure: BuildStructure, taskKey: ScopedKey[Task[T]], state: State, ref: ProjectRef, config: EvaluateConfig): Option[(State, Result[T])] =
     apply(structure, taskKey, state, ref, EvaluateTaskConfig(config))
   def apply[T](structure: BuildStructure, taskKey: ScopedKey[Task[T]], state: State, ref: ProjectRef, config: EvaluateTaskConfig): Option[(State, Result[T])] = {
@@ -323,7 +302,7 @@ object EvaluateTask {
   def nodeView[HL <: HList](state: State, streams: Streams, roots: Seq[ScopedKey[_]], dummies: DummyTaskMap = DummyTaskMap(Nil)): NodeView[Task] =
     Transform((dummyRoots, roots) :: (dummyStreamsManager, streams) :: (dummyState, state) :: dummies)
 
-  @deprecated("Use new EvaluateTaskConfig option to runTask", "0.13.5")
+  @deprecated("Use new EvalauteTaskConfig option to runTask", "0.13.5")
   def runTask[T](root: Task[T], state: State, streams: Streams, triggers: Triggers[Task], config: EvaluateConfig)(implicit taskToNode: NodeView[Task]): (State, Result[T]) =
     {
       val newConfig = EvaluateTaskConfig(config)
@@ -334,17 +313,21 @@ object EvaluateTask {
       import ConcurrentRestrictions.{ completionService, TagMap, Tag, tagged, tagsKey }
 
       val log = state.log
-      log.debug(s"Running task... Cancel: ${config.cancelStrategy}, check cycles: ${config.checkCycles}, forcegc: ${config.forceGarbageCollection}")
+      log.debug("Running task... Cancel: " + config.cancelStrategy + ", check cycles: " + config.checkCycles)
       val tags = tagged[Task[_]](_.info get tagsKey getOrElse Map.empty, Tags.predicate(config.restrictions))
       val (service, shutdownThreads) = completionService[Task[_], Completed](tags, (s: String) => log.warn(s))
 
       def shutdown(): Unit = {
         // First ensure that all threads are stopped for task execution.
         shutdownThreads()
-
         // Now we run the gc cleanup to force finalizers to clear out file handles (yay GC!)
         if (config.forceGarbageCollection) {
-          GCUtil.forceGcWithInterval(config.minForcegcInterval, log)
+          // Force the detection of finalizers for scala.reflect weakhashsets
+          System.gc()
+          // Force finalizers to run.
+          System.runFinalization()
+          // Force actually cleaning the weak hash maps.
+          System.gc()
         }
       }
       // propagate the defining key for reporting the origin

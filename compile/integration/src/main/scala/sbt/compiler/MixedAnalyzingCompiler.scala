@@ -5,6 +5,7 @@ import java.lang.ref.{ SoftReference, Reference }
 
 import sbt.classfile.Analyze
 import sbt.classpath.ClasspathUtilities
+import sbt.compiler.CompileConfiguration
 import sbt.compiler.javac.AnalyzingJavaCompiler
 import sbt.inc.Locate.DefinesClass
 import sbt._

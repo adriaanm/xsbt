@@ -61,10 +61,10 @@ class MakePomSpec extends Specification {
 
   val mp = new MakePom(ConsoleLogger())
   def convertTo(s: String, expected: String) =
-    MakePom.makeDependencyVersion(s) must_== expected
+    mp.makeDependencyVersion(s) must_== expected
   def beParsedAsError(s: String) =
     try {
-      MakePom.makeDependencyVersion(s)
+      mp.makeDependencyVersion(s)
       failure
     } catch {
       case e: Throwable => success

@@ -4,7 +4,6 @@ package ivyint
 import java.util.Date
 import java.net.URL
 import java.io.File
-import java.text.SimpleDateFormat
 import collection.concurrent
 import collection.mutable
 import collection.immutable.ListMap
@@ -21,19 +20,12 @@ import org.apache.ivy.plugins.latest.{ ArtifactInfo => IvyArtifactInfo }
 import org.apache.ivy.plugins.matcher.{ MapMatcher, PatternMatcher }
 import Configurations.{ System => _, _ }
 import annotation.tailrec
-import scala.concurrent.duration._
 
 private[sbt] object CachedResolutionResolveCache {
   def createID(organization: String, name: String, revision: String) =
     ModuleRevisionId.newInstance(organization, name, revision)
-  def sbtOrgTemp = JsonUtil.sbtOrgTemp
-  def graphVersion = "0.13.9C"
-  val buildStartup: Long = System.currentTimeMillis
-  lazy val todayStr: String = toYyyymmdd(buildStartup)
-  lazy val tomorrowStr: String = toYyyymmdd(buildStartup + (1 day).toMillis)
-  lazy val yesterdayStr: String = toYyyymmdd(buildStartup - (1 day).toMillis)
-  def toYyyymmdd(timeSinceEpoch: Long): String = yyyymmdd.format(new Date(timeSinceEpoch))
-  lazy val yyyymmdd: SimpleDateFormat = new SimpleDateFormat("yyyy-MM-dd")
+  def sbtOrgTemp = "org.scala-sbt.temp"
+  def graphVersion = "0.13.8"
 }
 
 private[sbt] class CachedResolutionResolveCache() {
@@ -57,7 +49,7 @@ private[sbt] class CachedResolutionResolveCache() {
     {
       log.debug(s":: building artificial module descriptors from ${md0.getModuleRevisionId}")
       // val expanded = expandInternalDependencies(md0, data, prOpt, log)
-      val rootModuleConfigs = md0.getConfigurations.toVector
+      val rootModuleConfigs = md0.getConfigurations.toArray.toVector
       directDependencies(md0) map { dd =>
         val arts = dd.getAllDependencyArtifacts.toVector map { x => s"""${x.getName}:${x.getType}:${x.getExt}:${x.getExtraAttributes}""" }
         log.debug(s"::: dd: $dd (artifacts: ${arts.mkString(",")})")
@@ -145,17 +137,7 @@ private[sbt] class CachedResolutionResolveCache() {
       val staticGraphDirectory = miniGraphPath / "static"
       val dynamicGraphDirectory = miniGraphPath / "dynamic"
       val staticGraphPath = staticGraphDirectory / pathOrg / pathName / pathRevision / "graphs" / "graph.json"
-      val dynamicGraphPath = dynamicGraphDirectory / todayStr / logicalClock.toString / pathOrg / pathName / pathRevision / "graphs" / "graph.json"
-      def cleanDynamicGraph(): Unit =
-        {
-          val list = IO.listFiles(dynamicGraphDirectory, DirectoryFilter).toList
-          list filterNot { d =>
-            (d.getName == todayStr) || (d.getName == tomorrowStr) || (d.getName == yesterdayStr)
-          } foreach { d =>
-            log.debug(s"deleting old graphs $d...")
-            IO.delete(d)
-          }
-        }
+      val dynamicGraphPath = dynamicGraphDirectory / logicalClock.toString / pathOrg / pathName / pathRevision / "graphs" / "graph.json"
       def loadMiniGraphFromFile: Option[Either[ResolveException, UpdateReport]] =
         (if (staticGraphPath.exists) Some(staticGraphPath)
         else if (dynamicGraphPath.exists) Some(dynamicGraphPath)
@@ -193,9 +175,6 @@ private[sbt] class CachedResolutionResolveCache() {
               val gp = if (changing) dynamicGraphPath
               else staticGraphPath
               log.debug(s"saving minigraph to $gp")
-              if (changing) {
-                cleanDynamicGraph()
-              }
               JsonUtil.writeUpdateReport(ur, gp)
               // limit the update cache size
               if (updateReportCache.size > maxUpdateReportCacheSize) {
@@ -367,7 +346,6 @@ private[sbt] trait CachedResolutionResolveEngine extends ResolveEngine {
       val cachedReports = reports filter { !_.stats.cached }
       val stats = new UpdateStats(resolveTime, (cachedReports map { _.stats.downloadTime }).sum, (cachedReports map { _.stats.downloadSize }).sum, false)
       val configReports = rootModuleConfigs map { conf =>
-        log.debug("::: -----------")
         val crs = reports flatMap { _.configurations filter { _.configuration == conf.getName } }
         mergeConfigurationReports(conf.getName, crs, os, log)
       }
@@ -393,168 +371,58 @@ private[sbt] trait CachedResolutionResolveEngine extends ResolveEngine {
   /**
    * Returns a tuple of (merged org + name combo, newly evicted modules)
    */
-  def mergeOrganizationArtifactReports(rootModuleConf: String, reports0: Vector[OrganizationArtifactReport], os: Vector[IvyOverride], log: Logger): Vector[OrganizationArtifactReport] =
+  def mergeOrganizationArtifactReports(rootModuleConf: String, reports0: Seq[OrganizationArtifactReport], os: Vector[IvyOverride], log: Logger): Vector[OrganizationArtifactReport] =
     {
-      // filter out evicted modules from further logic
-      def filterReports(report0: OrganizationArtifactReport): Option[OrganizationArtifactReport] =
-        report0.modules.toVector flatMap { mr =>
-          if (mr.evicted || mr.problem.nonEmpty) None
-          else
-            // https://github.com/sbt/sbt/issues/1763
-            Some(mr.copy(callers = JsonUtil.filterOutArtificialCallers(mr.callers)))
-        } match {
-          case Vector() => None
-          case ms       => Some(OrganizationArtifactReport(report0.organization, report0.name, ms))
-        }
-
+      val evicteds: mutable.ListBuffer[ModuleReport] = mutable.ListBuffer()
+      val results: mutable.ListBuffer[OrganizationArtifactReport] = mutable.ListBuffer()
       // group by takes up too much memory. trading space with time.
-      val orgNamePairs: Vector[(String, String)] = (reports0 map { oar => (oar.organization, oar.name) }).distinct
-      // this might take up some memory, but it's limited to a single
-      val reports1 = reports0 flatMap { filterReports }
-      val allModules0: Map[(String, String), Vector[OrganizationArtifactReport]] =
-        Map(orgNamePairs map {
-          case (organization, name) =>
-            val xs = reports1 filter { oar => oar.organization == organization && oar.name == name }
-            ((organization, name), xs)
-        }: _*)
-      // this returns a List of Lists of (org, name). should be deterministic
-      def detectLoops(allModules: Map[(String, String), Vector[OrganizationArtifactReport]]): List[List[(String, String)]] =
-        {
-          val loopSets: mutable.Set[Set[(String, String)]] = mutable.Set.empty
-          val loopLists: mutable.ListBuffer[List[(String, String)]] = mutable.ListBuffer.empty
-          def testLoop(m: (String, String), current: (String, String), history: List[(String, String)]): Unit =
-            {
-              val callers =
-                (for {
-                  oar <- allModules.getOrElse(current, Vector())
-                  mr <- oar.modules
-                  c <- mr.callers
-                } yield (c.caller.organization, c.caller.name)).distinct
-              callers foreach { c =>
-                if (history contains c) {
-                  val loop = (c :: history.takeWhile(_ != c)) ::: List(c)
-                  if (!loopSets(loop.toSet)) {
-                    loopSets += loop.toSet
-                    loopLists += loop
-                    val loopStr = (loop map { case (o, n) => s"$o:$n" }).mkString("->")
-                    log.warn(s"""avoid circular dependency while using cached resolution: $loopStr""")
-                  }
-                } else testLoop(m, c, c :: history)
-              }
-            }
-          orgNamePairs map { orgname =>
-            testLoop(orgname, orgname, List(orgname))
+      val orgNamePairs = (reports0 map { oar => (oar.organization, oar.name) }).distinct
+      orgNamePairs foreach {
+        case (organization, name) =>
+          // hand rolling groupBy to avoid memory allocation
+          val xs = reports0 filter { oar => oar.organization == organization && oar.name == name }
+          if (xs.size == 0) () // do nothing
+          else if (xs.size == 1) results += xs.head
+          else
+            results += (mergeModuleReports(rootModuleConf, xs flatMap { _.modules }, os, log) match {
+              case (survivor, newlyEvicted) =>
+                evicteds ++= newlyEvicted
+                new OrganizationArtifactReport(organization, name, survivor ++ newlyEvicted)
+            })
+      }
+      transitivelyEvict(rootModuleConf, results.toList.toVector, evicteds.toList, log)
+    }
+  /**
+   * This transitively evicts any non-evicted modules whose only callers are newly evicted.
+   */
+  @tailrec
+  private final def transitivelyEvict(rootModuleConf: String, reports0: Vector[OrganizationArtifactReport],
+    evicted0: List[ModuleReport], log: Logger): Vector[OrganizationArtifactReport] =
+    {
+      val em = evicted0 map { _.module }
+      def isTransitivelyEvicted(mr: ModuleReport): Boolean =
+        mr.callers forall { c => em contains { c.caller } }
+      val evicteds: mutable.ListBuffer[ModuleReport] = mutable.ListBuffer()
+      // Ordering of the OrganizationArtifactReport matters
+      val reports: Vector[OrganizationArtifactReport] = reports0 map { oar =>
+        val organization = oar.organization
+        val name = oar.name
+        val (affected, unaffected) = oar.modules partition { mr =>
+          val x = !mr.evicted && mr.problem.isEmpty && isTransitivelyEvicted(mr)
+          if (x) {
+            log.debug(s""":::: transitively evicted $rootModuleConf: $organization:$name""")
           }
-          loopLists.toList
+          x
         }
-      val allModules2: mutable.Map[(String, String), Vector[OrganizationArtifactReport]] =
-        mutable.Map(allModules0.toSeq: _*)
-      @tailrec def breakLoops(loops: List[List[(String, String)]]): Unit =
-        loops match {
-          case Nil => ()
-          case loop :: rest =>
-            loop match {
-              case Nil =>
-                breakLoops(rest)
-              case loop =>
-                val sortedLoop = loop sortBy { x =>
-                  (for {
-                    oar <- allModules0(x)
-                    mr <- oar.modules
-                    c <- mr.callers
-                  } yield c).size
-                }
-                val moduleWithMostCallers = sortedLoop.reverse.head
-                val next: (String, String) = loop(loop.indexOf(moduleWithMostCallers) + 1)
-                // remove the module with most callers as the caller of next.
-                // so, A -> C, B -> C, and C -> A. C has the most callers, and C -> A will be removed.
-                allModules2 foreach {
-                  case (k: (String, String), oars0) if k == next =>
-                    val oars: Vector[OrganizationArtifactReport] = oars0 map { oar =>
-                      val mrs = oar.modules map { mr =>
-                        val callers0 = mr.callers
-                        val callers = callers0 filterNot { c => (c.caller.organization, c.caller.name) == moduleWithMostCallers }
-                        if (callers.size == callers0.size) mr
-                        else {
-                          log.debug(s":: $rootModuleConf: removing caller $moduleWithMostCallers -> $next for sorting")
-                          mr.copy(callers = callers)
-                        }
-                      }
-                      OrganizationArtifactReport(oar.organization, oar.name, mrs)
-                    }
-                    allModules2(k) = oars
-                  case (k, v) => // do nothing
-                }
-
-                breakLoops(rest)
-            }
+        val newlyEvicted = affected map { _.copy(evicted = true, evictedReason = Some("transitive-evict")) }
+        if (affected.isEmpty) oar
+        else {
+          evicteds ++= newlyEvicted
+          new OrganizationArtifactReport(organization, name, unaffected ++ newlyEvicted)
         }
-      val loop = detectLoops(allModules0)
-      log.debug(s":: $rootModuleConf: loop: $loop")
-      breakLoops(loop)
-
-      // sort the all modules such that less called modules comes earlier
-      @tailrec def sortModules(cs: Vector[(String, String)],
-        acc: Vector[(String, String)], extra: Vector[(String, String)],
-        n: Int, guard: Int): Vector[(String, String)] =
-        {
-          // println(s"sortModules: $n / $guard")
-          val keys = cs.toSet
-          val (called, notCalled) = cs partition { k =>
-            val reports = allModules2(k)
-            reports exists {
-              _.modules.exists {
-                _.callers exists { caller =>
-                  val m = caller.caller
-                  keys((m.organization, m.name))
-                }
-              }
-            }
-          }
-          lazy val result0 = acc ++ notCalled ++ called ++ extra
-          def warnCircular(): Unit = {
-            log.warn(s"""unexpected circular dependency while using cached resolution: ${cs.mkString(",")}""")
-          }
-          (if (n > guard) {
-            warnCircular
-            result0
-          } else if (called.isEmpty) result0
-          else if (notCalled.isEmpty) {
-            warnCircular
-            sortModules(cs.tail, acc, extra :+ cs.head, n + 1, guard)
-          } else sortModules(called, acc ++ notCalled, extra, 0, called.size * called.size + 1))
-        }
-      def resolveConflicts(cs: List[(String, String)],
-        allModules: Map[(String, String), Vector[OrganizationArtifactReport]]): List[OrganizationArtifactReport] =
-        cs match {
-          case Nil => Nil
-          case (organization, name) :: rest =>
-            val reports = allModules((organization, name))
-            reports match {
-              case Vector()                           => resolveConflicts(rest, allModules)
-              case Vector(oa) if (oa.modules.isEmpty) => resolveConflicts(rest, allModules)
-              case Vector(oa) if (oa.modules.size == 1 && !oa.modules.head.evicted) =>
-                log.debug(s":: no conflict $rootModuleConf: ${oa.organization}:${oa.name}")
-                oa :: resolveConflicts(rest, allModules)
-              case oas =>
-                (mergeModuleReports(rootModuleConf, oas flatMap { _.modules }, os, log) match {
-                  case (survivor, newlyEvicted) =>
-                    val evicted = (survivor ++ newlyEvicted) filter { m => m.evicted }
-                    val notEvicted = (survivor ++ newlyEvicted) filter { m => !m.evicted }
-                    log.debug("::: adds " + (notEvicted map { _.module }).mkString(", "))
-                    log.debug("::: evicted " + (evicted map { _.module }).mkString(", "))
-                    val x = new OrganizationArtifactReport(organization, name, survivor ++ newlyEvicted)
-                    val nextModules = transitivelyEvict(rootModuleConf, rest, allModules, evicted, log)
-                    x :: resolveConflicts(rest, nextModules)
-                })
-            }
-        }
-      val guard0 = (orgNamePairs.size * orgNamePairs.size) + 1
-      val sorted: Vector[(String, String)] = sortModules(orgNamePairs, Vector(), Vector(), 0, guard0)
-      val sortedStr = (sorted map { case (o, n) => s"$o:$n" }).mkString(", ")
-      log.debug(s":: sort result: $sortedStr")
-      val result = resolveConflicts(sorted.toList, allModules0)
-      result.toVector
+      }
+      if (evicteds.isEmpty) reports
+      else transitivelyEvict(rootModuleConf, reports, evicteds.toList, log)
     }
   /**
    * Merges ModuleReports, which represents orgnization, name, and version.
@@ -562,16 +430,12 @@ private[sbt] trait CachedResolutionResolveEngine extends ResolveEngine {
    */
   def mergeModuleReports(rootModuleConf: String, modules: Seq[ModuleReport], os: Vector[IvyOverride], log: Logger): (Vector[ModuleReport], Vector[ModuleReport]) =
     {
-      if (modules.nonEmpty) {
-        log.debug(s":: merging module reports for $rootModuleConf: ${modules.head.module.organization}:${modules.head.module.name}")
-      }
       def mergeModuleReports(org: String, name: String, version: String, xs: Seq[ModuleReport]): ModuleReport = {
         val completelyEvicted = xs forall { _.evicted }
         val allCallers = xs flatMap { _.callers }
-        // Caller info is often repeated across the subprojects. We only need ModuleID info for later, so xs.head is ok.
-        val distinctByModuleId = allCallers.groupBy({ _.caller }).toList map { case (k, xs) => xs.head }
         val allArtifacts = (xs flatMap { _.artifacts }).distinct
-        xs.head.copy(artifacts = allArtifacts, evicted = completelyEvicted, callers = distinctByModuleId)
+        log.debug(s":: merging module report for $org:$name:$version - $allArtifacts")
+        xs.head.copy(artifacts = allArtifacts, evicted = completelyEvicted, callers = allCallers)
       }
       val merged = (modules groupBy { m => (m.module.organization, m.module.name, m.module.revision) }).toSeq.toVector flatMap {
         case ((org, name, version), xs) =>
@@ -584,35 +448,6 @@ private[sbt] trait CachedResolutionResolveEngine extends ResolveEngine {
         case (survivor, evicted) =>
           (survivor ++ (merged filter { m => m.evicted || m.problem.isDefined }), evicted)
       }
-    }
-  /**
-   * This transitively evicts any non-evicted modules whose only callers are newly evicted.
-   */
-  def transitivelyEvict(rootModuleConf: String, pairs: List[(String, String)],
-    reports0: Map[(String, String), Vector[OrganizationArtifactReport]],
-    evicted0: Vector[ModuleReport], log: Logger): Map[(String, String), Vector[OrganizationArtifactReport]] =
-    {
-      val em = (evicted0 map { _.module }).toSet
-      def isTransitivelyEvicted(mr: ModuleReport): Boolean =
-        mr.callers forall { c => em(c.caller) }
-      val reports: Seq[((String, String), Vector[OrganizationArtifactReport])] = reports0.toSeq flatMap {
-        case (k, v) if !(pairs contains k) => Seq()
-        case ((organization, name), oars0) =>
-          val oars = oars0 map { oar =>
-            val (affected, unaffected) = oar.modules partition { mr =>
-              val x = !mr.evicted && mr.problem.isEmpty && isTransitivelyEvicted(mr)
-              if (x) {
-                log.debug(s""":::: transitively evicted $rootModuleConf: ${mr.module}""")
-              }
-              x
-            }
-            val newlyEvicted = affected map { _.copy(evicted = true, evictedReason = Some("transitive-evict")) }
-            if (affected.isEmpty) oar
-            else new OrganizationArtifactReport(organization, name, unaffected ++ newlyEvicted)
-          }
-          Seq(((organization, name), oars))
-      }
-      Map(reports: _*)
     }
   /**
    * resolves dependency resolution conflicts in which multiple candidates are found for organization+name combos.
@@ -631,7 +466,7 @@ private[sbt] trait CachedResolutionResolveEngine extends ResolveEngine {
       val head = conflicts.head
       val organization = head.module.organization
       val name = head.module.name
-      log.debug(s"::: resolving conflict in $rootModuleConf:$organization:$name " + (conflicts map { _.module }).mkString("(", ", ", ")"))
+      log.debug(s"- conflict in $rootModuleConf:$organization:$name " + (conflicts map { _.module }).mkString("(", ", ", ")"))
       def useLatest(lcm: LatestConflictManager): (Vector[ModuleReport], Vector[ModuleReport], String) =
         (conflicts find { m =>
           m.callers.exists { _.isDirectlyForceDependency }
@@ -680,8 +515,7 @@ private[sbt] trait CachedResolutionResolveEngine extends ResolveEngine {
       if (conflicts.size == 2 && os.isEmpty) {
         val (cf0, cf1) = (conflicts(0).module, conflicts(1).module)
         val cache = cachedResolutionResolveCache
-        val (surviving, evicted) = cache.getOrElseUpdateConflict(cf0, cf1, conflicts) { doResolveConflict }
-        (surviving, evicted)
+        cache.getOrElseUpdateConflict(cf0, cf1, conflicts) { doResolveConflict }
       } else {
         val (surviving, evicted, mgr) = doResolveConflict
         (surviving, evicted)
@@ -699,7 +533,7 @@ private[sbt] trait CachedResolutionResolveEngine extends ResolveEngine {
           case None => Vector()
         }
       // These are the configurations from the original project we want to resolve.
-      val rootModuleConfs = md0.getConfigurations.toVector
+      val rootModuleConfs = md0.getConfigurations.toArray.toVector
       val configurations0 = ur.configurations.toVector
       // This is how md looks from md0 via dd's mapping.
       val remappedConfigs0: Map[String, Vector[String]] = Map(rootModuleConfs map { conf0 =>

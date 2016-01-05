@@ -13,8 +13,6 @@ import BasicKeys._
 
 import java.io.File
 
-import scala.util.control.NonFatal
-
 object BasicCommands {
   lazy val allBasicCommands = Seq(nop, ignore, help, completionsCommand, multi, ifLast, append, setOnFailure, clearOnFailure, stashOnFailure, popOnFailure, reboot, call, early, exit, continuous, history, shell, read, alias) ++ compatCommands
 
@@ -29,10 +27,7 @@ object BasicCommands {
 
   def helpParser(s: State) =
     {
-      val h = (Help.empty /: s.definedCommands) { (a, b) =>
-        a ++
-          (try b.help(s) catch { case NonFatal(ex) => Help.empty })
-      }
+      val h = (Help.empty /: s.definedCommands)(_ ++ _.help(s))
       val helpCommands = h.detail.keySet
       val spacedArg = singleArgument(helpCommands).?
       applyEffect(spacedArg)(runHelp(s, h))
@@ -40,12 +35,7 @@ object BasicCommands {
 
   def runHelp(s: State, h: Help)(arg: Option[String]): State =
     {
-      val message = try
-        Help.message(h, arg)
-      catch {
-        case NonFatal(ex) =>
-          ex.toString
-      }
+      val message = Help.message(h, arg)
       System.out.println(message)
       s
     }
@@ -274,7 +264,7 @@ object BasicCommands {
     val aliasRemoved = removeAlias(state, name)
     // apply the alias value to the commands of `state` except for the alias to avoid recursion (#933)
     val partiallyApplied = Parser(Command.combine(aliasRemoved.definedCommands)(aliasRemoved))(value)
-    val arg = matched(partiallyApplied & (success(()) | (SpaceClass ~ any.*)))
+    val arg = matched(partiallyApplied & (success() | (SpaceClass ~ any.*)))
     // by scheduling the expanded alias instead of directly executing, we get errors on the expanded string (#598)
     arg.map(str => () => (value + str) :: state)
   }

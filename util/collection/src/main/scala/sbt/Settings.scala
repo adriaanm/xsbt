@@ -244,12 +244,7 @@ trait Init[Scope] {
     @deprecated("Use the non-deprecated Undefined factory method.", "0.13.1")
     def this(definingKey: ScopedKey[_], referencedKey: ScopedKey[_], derived: Boolean) = this(fakeUndefinedSetting(definingKey, derived), referencedKey)
   }
-  final class RuntimeUndefined(val undefined: Seq[Undefined]) extends RuntimeException("References to undefined settings at runtime.") {
-    override def getMessage =
-      super.getMessage + undefined.map { u =>
-        "\n" + u.defining + " referenced from " + u.referencedKey
-      }.mkString
-  }
+  final class RuntimeUndefined(val undefined: Seq[Undefined]) extends RuntimeException("References to undefined settings at runtime.")
 
   @deprecated("Use the other overload.", "0.13.1")
   def Undefined(definingKey: ScopedKey[_], referencedKey: ScopedKey[_], derived: Boolean): Undefined =

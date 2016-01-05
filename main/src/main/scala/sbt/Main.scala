@@ -16,7 +16,6 @@ import StandardMain._
 import java.io.File
 import java.net.URI
 import java.util.Locale
-import scala.util.control.NonFatal
 
 /** This class is the entry point for sbt.*/
 final class xMain extends xsbti.AppMain {
@@ -178,15 +177,7 @@ object BuiltinCommands {
       val extracted = Project.extract(s)
       import extracted._
       val index = structure.index
-      index.keyIndex.keys(Some(currentRef)).toSeq.map { key =>
-        try
-          Some(index.keyMap(key))
-        catch {
-          case NonFatal(ex) =>
-            s.log error ex.getMessage
-            None
-        }
-      }.collect { case Some(s) => s }.distinct
+      index.keyIndex.keys(Some(currentRef)).toSeq.map(index.keyMap).distinct
     }
 
   def sortByLabel(keys: Seq[AttributeKey[_]]): Seq[AttributeKey[_]] = keys.sortBy(_.label)
@@ -487,17 +478,7 @@ object BuiltinCommands {
       val (s1, base) = Project.loadAction(SessionVar.clear(s0), action)
       IO.createDirectory(base)
       val s = if (s1 has Keys.stateCompilerCache) s1 else registerCompilerCache(s1)
-
-      val (eval, structure) =
-        try Load.defaultLoad(s, base, s.log, Project.inPluginProject(s), Project.extraBuilds(s))
-        catch {
-          case ex: compiler.EvalException =>
-            s0.log.debug(ex.getMessage)
-            ex.getStackTrace map (ste => s"\tat $ste") foreach (s0.log.debug(_))
-            ex.setStackTrace(Array.empty)
-            throw ex
-        }
-
+      val (eval, structure) = Load.defaultLoad(s, base, s.log, Project.inPluginProject(s), Project.extraBuilds(s))
       val session = Load.initialSession(structure, eval, s0)
       SessionSettings.checkSession(session, s)
       Project.setProject(session, structure, s)

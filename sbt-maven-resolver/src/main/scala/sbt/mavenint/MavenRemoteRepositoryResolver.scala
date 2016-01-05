@@ -11,9 +11,7 @@ import org.eclipse.aether.resolution.{
   ArtifactDescriptorRequest => AetherDescriptorRequest,
   ArtifactDescriptorResult => AetherDescriptorResult,
   ArtifactRequest => AetherArtifactRequest,
-  MetadataRequest => AetherMetadataRequest,
-  VersionRequest => AetherVersionRequest,
-  VersionRangeRequest => AetherVersionRangeRequest
+  MetadataRequest => AetherMetadataRequest
 }
 import sbt.ivyint.CustomRemoteMavenResolver
 import scala.collection.JavaConverters._
@@ -45,11 +43,6 @@ class MavenRemoteRepositoryResolver(val repo: MavenRepository, settings: IvySett
     if (isUseCacheOnly) request else request.addRepository(aetherRepository)
   protected def addRepositories(request: AetherArtifactRequest): AetherArtifactRequest =
     if (isUseCacheOnly) request else request.addRepository(aetherRepository)
-  protected def addRepositories(request: AetherVersionRequest): AetherVersionRequest =
-    if (isUseCacheOnly) request else request.addRepository(aetherRepository)
-  protected def addRepositories(request: AetherVersionRangeRequest): AetherVersionRangeRequest =
-    if (isUseCacheOnly) request else request.addRepository(aetherRepository)
-
   /** Actually publishes aether artifacts. */
   protected def publishArtifacts(artifacts: Seq[AetherArtifact]): Unit = {
     val request = new AetherDeployRequest()

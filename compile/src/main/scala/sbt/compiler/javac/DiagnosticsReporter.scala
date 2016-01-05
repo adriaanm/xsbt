@@ -69,38 +69,18 @@ final class DiagnosticsReporter(reporter: Reporter) extends DiagnosticListener[J
         def startPosition: Option[Long] = checkNoPos(d.getStartPosition)
         def endPosition: Option[Long] = checkNoPos(d.getEndPosition)
         override val offset: Maybe[Integer] = Logger.o2m(checkNoPos(d.getPosition) map { x => new Integer(x.toInt) })
-        override def lineContent: String = {
-          def getDiagnosticLine: Option[String] =
-            try {
-              // See com.sun.tools.javac.api.ClientCodeWrapper.DiagnosticSourceUnwrapper
-              val diagnostic = d.getClass.getField("d").get(d)
-              // See com.sun.tools.javac.util.JCDiagnostic#getDiagnosticSource
-              val getDiagnosticSourceMethod = diagnostic.getClass.getDeclaredMethod("getDiagnosticSource")
-              val getPositionMethod = diagnostic.getClass.getDeclaredMethod("getPosition")
-              (Option(getDiagnosticSourceMethod.invoke(diagnostic)), Option(getPositionMethod.invoke(diagnostic))) match {
-                case (Some(diagnosticSource), Some(position: java.lang.Long)) =>
-                  // See com.sun.tools.javac.util.DiagnosticSource
-                  val getLineMethod = diagnosticSource.getClass.getMethod("getLine", Integer.TYPE)
-                  Option(getLineMethod.invoke(diagnosticSource, new Integer(position.intValue()))).map(_.toString)
-                case _ => None
+        // TODO - Is this pulling contents of the line correctly?
+        // Would be ok to just return null if this version of the JDK doesn't support grabbing
+        // source lines?
+        override def lineContent: String =
+          Option(d.getSource) match {
+            case Some(source: JavaFileObject) =>
+              (Option(source.getCharContent(true)), startPosition, endPosition) match {
+                case (Some(cc), Some(start), Some(end)) => cc.subSequence(start.toInt, end.toInt).toString
+                case _                                  => ""
               }
-            } catch {
-              // TODO - catch ReflectiveOperationException once sbt is migrated to JDK7
-              case ignored: Throwable => None
-            }
-
-          def getExpression: String =
-            Option(d.getSource) match {
-              case Some(source: JavaFileObject) =>
-                (Option(source.getCharContent(true)), startPosition, endPosition) match {
-                  case (Some(cc), Some(start), Some(end)) => cc.subSequence(start.toInt, end.toInt).toString
-                  case _                                  => ""
-                }
-              case _ => ""
-            }
-
-          getDiagnosticLine.getOrElse(getExpression)
-        }
+            case _ => ""
+          }
         private val sourceUri = fixSource(d.getSource)
         override val sourcePath = Logger.o2m(sourceUri)
         override val sourceFile = Logger.o2m(sourceUri.map(new File(_)))
